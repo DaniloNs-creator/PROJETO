@@ -1,0 +1,102 @@
+﻿classe,pergunta
+1,Indicadores
+1.1,Todas as áreas possuem indicadores de performance chaves para gerenciar seus processos?
+1.2,As atividades executadas pelas áreas são contempladas por estes indicadores?
+1.3,Existe um DNA do indicador e uma meta clara para nortear os indicadores?
+1.4,Esta meta foi discutida para ser formalizada? Existe documento que comprove?
+1.5,Existe uma rotina (periódica) de apresentação dos resultados? Há documentos para comprovar?
+1.6,São montados planos para melhorar os resultados com indicadores? O Plano de ação é acompanhado por uma área alheia?
+1.7,Os indicadores são revisados periodicamente para avaliar sua aderencia aos processos?
+1.8,As metas são reavaliadas conforme resultados e períodos?
+2,Compliance
+2.1,Possui políticas e procedimentos para a os processo de relações instituicionais?
+2.2,Possui polítcas e procedimento de contratação e monitoramento de Colaboradores Próprios e Autonomos?
+2.3,Possui políticas e procedimentos de permissões de acesso e alçadas de aprovação?
+2.4,Possui políticas de controles e gestão de estoques e almoxarifados?
+2.5,Possui políticas de controles de gestão financeira
+2.6,Existe política de conciliações contábeis e de fechamento das demonstrações financeiras?
+2.7,Existe política e procedimentos de faturamentos?
+2.8,Existe política e procedimentos de contas a pagar e a receber?
+2.9,Existe política e procedimentos para cobranças?
+2.1,Existe política e procedimentos para pagamentos de fornecedores e Prestadores de Serviços e Outros?
+2.11,Existe política e procedimentos para controles de descontos e abatimentos?
+2.12,Existe política e procedimentos para acordos e parcerias estratégicas?
+2.13,Possui políticas de controles dos processos logisticos?
+2.14,Possui políticas de controles dos processos de estoques?
+2.15,Possui políticas e procedimentos para Contratação e Homologação de Fornecedores e Rede de Atendimento?
+2.16,Possui políticas e procedimentos para adminssão recrutamento e seleção?
+2.17,Possui políticas e procedimentos para detecção de falhas de processos?
+2.18,Possui políticas e procedimentos para unidades de produção?
+2.19,Possui políticas e procedimentos para segurança patrimonial?
+2.2,Possui políticas e procedimentos para fechamentos contábeis?
+2.21,Possui políticas e procedimentos de TI e Estrutura de Técnologia?
+2.22,Possui políticas e procedimentos de investimentos?
+2.23,Existe Código de Ética e Conduta implementado?
+2.24,Existem polítcas de Privacidade e Proteção de dados pessoais?
+2.25,Existem políticas e procedimentos que garantem gestão de crises?
+2.26,"Existem políticas de Governança Corporativa, Responsabilidade Social e Ambiental?"
+2.27,"Existe Políticas de Combate a Corrupção, Fraude Lavagem de Dinheiro?"
+2.28,Existe políticas de controle dos ativos?
+3,Treinamento
+3.1,Existe um plano de treinamento e desenvolvimento interno?
+3.2,Há um plano de acompanhamento das atividades para orientação?
+3.3,"Há treinamentos específicos para conselheiros e gestores no tocante modelos de Governança, Gestão, Legislação e Liderança?"
+3.4,"Existe alguma área encarregada do plano de avaliação, melhorias e capacitação?"
+3.5,Existe um plano de treinamento contínuo para as área?
+3.6,"Nos ultimos anos foram realizados algum tipo de treinamento, mesmo no local de trabalho?"
+4,Programa de Melhoria
+4.1,Existe algum programa estabelecido de melhorias para as atividades que desenvolve?
+4.2,"As necessidades de melhorias são documentadas, análisadas e definido plano de ação de melhorias?"
+4.3,É utilizado alguma métodologia padrão para o tratamento das não conformidades?
+4.4,Há acompanhamento externo ou por área alheia no plano de ação de melhorias?
+4.5,Os administradores são envolvidos no plano de melhorias de processos?
+4.6,As melhorias implantadas são medidas e monitoradas para garantir a eficiência?
+5,Padronização de Documentos
+5.1,Existem formulários padronizados e automatizados para execução dos processo?
+5.2,Os formulários e relatórios utilizados são padronizados e automatizados?
+5.3,Todos conhecem os documentos necessários para execução dos processo?
+5.4,Todos sabem acessar e realiza a manutenção dos formulários?
+5.5,Os dados capturados são integrados entre as demais áreas?
+6,Padronização de Processos
+6.1,Os processos executados são mapeados e padronizados?
+6.2,Os Processos estão registrados em algum lugar (Fluxo ou descritivo)?
+6.3,Existem documentos que formalizam e normatizam os Procedimentos Operacionais Padrões (POP´s) e as Instruções de Trabalhos (IT´s)
+6.4,"Os POPs e It´s foram auditados, testados antes para Homologação e Aprovação?"
+6.5,Quando há mudanças nos processos esta documentação é atualizada?
+6.6,Os documentos estão acessiveis e são divulgado para os usuários?
+7,Regras de Negócio
+7.1,As regras e critérios para desenvolvimento dos processo são conhecidos?
+7.2,Estas regras são claras e objetivas?
+7.3,Elas estão disponiveis para consulta?
+7.4,As regras são difundidas para todos os usuários deste processo?
+7.5,Os usuários conhecem estas regras?
+7.6,Estas regras estão disponiveis para todos os solicitantes e envolvidos no processo?
+7.7,Estas sofrem atualizações ou revisões periódicas?
+7.8,Quando atualizadas são comunicadas?
+8,Riscos
+8.1,Os riscos operacionais dos processo são conhecidos?
+8.2,Eles são mensurados ou explicados aos envolvidos?
+8.3,Os riscos são avaliados conforme algum indicador?
+8.4,Estes riscos operacionais são acompanhados pela auditoria?
+8.5,São feitas reuniões periódicas para minimizar a ocorrencia destes riscos?
+9,Pacientes
+9.1,Existe Estrutura de Governança Formalizada e Instituida?
+9.2,A estrutura de GC está lastreada em Missão Visão e Valores?
+9.3,Existem indicadores das premissas de GC que indicam que está no rumo certo?
+9.4,São realizadas reuniões periódicas de Governança?
+9.5,Os resultados estratégicos são medidos e divulgados entre as áreas?
+9.6,Os desvios são apresentados as Lideranças (com a responsabilidade de ambos)?
+10,Competência
+10.1,Os envolvidos no processo possuem as competencias técnicas necessárias?
+10.2,Há treinamentos para divulgar e desenvolver as atividades necessárias?
+10.3,Há revisão dos conhecimentos necessários para desenvolvimento da atividade?
+10.4,Esta competência e dissiminada entre todos os envolvidos no processo?
+11,Gestão de Processos
+11.1,Os processos estão descrito em algum procedimento ou Fluxo?
+11.2,As regras dos processos estão descritas e claras nos procedimentos ou fluxos?
+11.3,Existem indicadoes de desempenho do processo? Com metas definidas?
+11.4,Os processos são monitorado com discução de sua performance?
+11.5,Os procedimentos estão atualizados e disponiveis para todos os usuários destes processos?
+11.6,Os procedimentos refletem ou complementam os fluxos?
+11.7,Os processos são avaliado periódicamente por auditores?
+11.8,As recomendações de melhorias são tratadas e implementadas?
