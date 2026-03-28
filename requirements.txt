@@ -1,36 +1,45 @@
-# Dependências principais
-streamlit>=1.32.0
+# --- Interface Web (Frontend) ---
+streamlit==1.32.0
 plotly>=5.18.0
-pandas>=2.0.0
+matplotlib==3.8.3
+seaborn==0.13.2
+
+# --- Processamento de Dados (Core) ---
+pandas==2.2.1
+numpy==1.26.4
 python-dateutil==2.8.2
-requests==2.31.0
-python-magic==0.4.27
+
+# --- Leitura/Escrita de Excel e Otimização (Superprocessamento) ---
+python-calamine>=0.2.0
+pyarrow>=14.0.0
 openpyxl==3.1.2
-selenium==4.15.2
-webdriver-manager==4.0.1
 xlsxwriter==3.1.9
-chardet==5.2.0
+
+# --- Tratamento de PDFs e Arquivos Diversos ---
 tabula-py==2.8.0
 pdfplumber==0.11.0
 PyMuPDF>=1.23.0
-lxml>=4.9.3
+python-magic==0.4.27
+chardet==5.2.0
 kaleido>=0.2.1
-# --- Interface Web (Frontend) ---
-streamlit>=1.30.0
-requests>=2.31.0
+lxml>=4.9.3
 
-# --- Servidor de Webhooks (Backend) ---
+# --- Webhooks e APIs ---
 fastapi>=0.100.0
 uvicorn>=0.27.0
 pydantic>=2.5.0
-streamlit==1.32.0
-pandas==2.2.1
-numpy==1.26.4
-sqlalchemy==2.0.29
-psycopg2-binary==2.9.9   # se usar PostgreSQL
-mysql-connector-python==8.3.0   # se usar MySQL
-matplotlib==3.8.3
-seaborn==0.13.2
-scikit-learn==1.4.1.post1
 requests==2.31.0
+
+# --- Banco de Dados ---
+sqlalchemy==2.0.29
+psycopg2-binary==2.9.9
+mysql-connector-python==8.3.0
+# Nota: sqlite3 é nativo do Python, não precisa ser instalado via pip
+
+# --- Automação e Machine Learning ---
+selenium==4.15.2
+webdriver-manager==4.0.1
+scikit-learn==1.4.1.post1
+
+# --- Utilidades ---
 python-dotenv==1.0.1
