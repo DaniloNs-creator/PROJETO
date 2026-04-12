@@ -1,15 +1,15 @@
 # --- Interface Web (Frontend) ---
 streamlit==1.32.0
 plotly>=5.18.0
-matplotlib==3.8.3
-seaborn==0.13.2
+matplotlib>=3.8.3
+seaborn>=0.13.2
 
 # --- Processamento de Dados (Core) ---
-pandas==2.2.1
-numpy==1.26.4
+pandas>=2.2.0
+numpy>=1.26.0
 python-dateutil==2.8.2
 
-# --- Leitura/Escrita de Excel e Otimização (Superprocessamento) ---
+# --- Leitura/Escrita de Excel e Otimização ---
 python-calamine>=0.2.0
 pyarrow>=14.0.0
 openpyxl==3.1.2
@@ -31,15 +31,14 @@ pydantic>=2.5.0
 requests==2.31.0
 
 # --- Banco de Dados ---
-sqlalchemy==2.0.29
-psycopg2-binary==2.9.9
-mysql-connector-python==8.3.0
-# Nota: sqlite3 é nativo do Python, não precisa ser instalado via pip
+sqlalchemy>=2.0.29
+psycopg2-binary>=2.9.9
+mysql-connector-python>=8.3.0
 
 # --- Automação e Machine Learning ---
 selenium==4.15.2
 webdriver-manager==4.0.1
-scikit-learn==1.4.1.post1
+scikit-learn>=1.4.1
 
 # --- Utilidades ---
 python-dotenv==1.0.1
