@@ -1,11 +1,11 @@
 # --- Interface Web (Frontend) ---
-streamlit==1.32.0
+streamlit>=1.32.0
 plotly>=5.18.0
 matplotlib>=3.8.3
 seaborn>=0.13.2
 
 # --- Processamento de Dados (Core) ---
-pandas>=2.2.0
+pandas>=2.0.0
 numpy>=1.26.0
 python-dateutil==2.8.2
 
