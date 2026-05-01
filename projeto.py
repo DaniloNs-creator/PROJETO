@@ -71,6 +71,9 @@ if "parsed_sigraweb" not in st.session_state:
     st.session_state["parsed_sigraweb"] = None
 if "merged_df" not in st.session_state:
     st.session_state["merged_df"] = None
+# Layout do arquivo APP2: "sigraweb" (novo) ou "extrato_duimp" (layout antigo)
+if "layout_app2" not in st.session_state:
+    st.session_state["layout_app2"] = "sigraweb"
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO)
@@ -116,109 +119,238 @@ def show_success_animation(message="Concluído!"):
 def load_css():
     st.markdown("""
     <style>
+        /* ── Variáveis de cor ── */
+        :root {
+            --primary:   #1E3A8A;
+            --primary-light: #2563EB;
+            --accent:    #3B82F6;
+            --success:   #059669;
+            --warning:   #D97706;
+            --danger:    #DC2626;
+            --bg-soft:   #F8FAFC;
+            --border:    #E2E8F0;
+            --text-muted:#64748B;
+            --radius:    10px;
+            --shadow-sm: 0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+            --shadow-md: 0 4px 12px rgba(0,0,0,.10);
+            --shadow-lg: 0 10px 30px rgba(0,0,0,.12);
+        }
+
+        /* ── Reset / base ── */
+        html, body, [class*="css"] { font-family: 'Inter', 'Segoe UI', sans-serif; }
+
+        /* ── Hero / cover ── */
         .cover-container {
-            background: linear-gradient(135deg, #f5f7fa 0%, #e4e8ed 100%);
-            padding: 3rem;
-            border-radius: 12px;
-            margin-bottom: 2rem;
+            background: linear-gradient(135deg, #0F172A 0%, #1E3A8A 60%, #2563EB 100%);
+            padding: 2.5rem 3rem;
+            border-radius: 16px;
+            margin-bottom: 1.8rem;
             text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+        .cover-container::before {
+            content: '';
+            position: absolute; inset: 0;
+            background: url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.03'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
         }
         .cover-logo {
-            max-width: 300px;
-            margin-bottom: 1.5rem;
+            max-width: 220px;
+            margin-bottom: 1.2rem;
+            filter: drop-shadow(0 4px 12px rgba(0,0,0,.3));
         }
         .cover-title {
-            font-size: 2.8rem;
+            font-size: 2.4rem;
             font-weight: 800;
-            margin-bottom: 1rem;
-            background: linear-gradient(90deg, #2c3e50, #3498db);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            color: #FFFFFF;
+            margin-bottom: .5rem;
+            letter-spacing: -.5px;
+            line-height: 1.2;
         }
         .cover-subtitle {
-            font-size: 1.2rem;
-            color: #7f8c8d;
+            font-size: 1rem;
+            color: rgba(255,255,255,.72);
             margin-bottom: 0;
+            letter-spacing: .3px;
         }
-        .header {
+        .cover-badges {
+            display: flex;
+            justify-content: center;
+            gap: .6rem;
+            margin-top: 1.2rem;
+            flex-wrap: wrap;
+        }
+        .badge {
+            background: rgba(255,255,255,.15);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,.25);
+            color: #fff;
+            border-radius: 20px;
+            padding: .25rem .85rem;
+            font-size: .78rem;
+            font-weight: 600;
+            letter-spacing: .4px;
+        }
+
+        /* ── Seção card ── */
+        .section-card {
+            background: #FFFFFF;
+            border-radius: var(--radius);
+            padding: 1.4rem 1.6rem;
+            box-shadow: var(--shadow-sm);
+            margin-bottom: 1rem;
+            border: 1px solid var(--border);
+            transition: box-shadow .2s ease;
+        }
+        .section-card:hover { box-shadow: var(--shadow-md); }
+
+        /* ── Layout selector card ── */
+        .layout-card {
+            background: linear-gradient(135deg, #EFF6FF, #DBEAFE);
+            border: 2px solid #93C5FD;
+            border-radius: var(--radius);
+            padding: 1.2rem 1.4rem;
+            margin-bottom: 1.2rem;
+        }
+        .layout-card-active {
+            background: linear-gradient(135deg, #DBEAFE, #BFDBFE);
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px rgba(59,130,246,.15);
+        }
+
+        /* ── Status boxes ── */
+        .success-box {
+            background: linear-gradient(135deg, #D1FAE5, #A7F3D0);
+            color: #065F46;
+            padding: .75rem 1rem;
+            border-radius: var(--radius);
+            border-left: 4px solid var(--success);
+            margin: .6rem 0;
+            font-weight: 500;
+        }
+        .info-box {
+            background: linear-gradient(135deg, #DBEAFE, #BFDBFE);
+            color: #1E40AF;
+            padding: .75rem 1rem;
+            border-radius: var(--radius);
+            border-left: 4px solid var(--accent);
+            margin: .6rem 0;
+        }
+        .warning-box {
+            background: linear-gradient(135deg, #FEF3C7, #FDE68A);
+            color: #92400E;
+            padding: .75rem 1rem;
+            border-radius: var(--radius);
+            border-left: 4px solid var(--warning);
+            margin: .6rem 0;
+        }
+
+        /* ── Section headers ── */
+        .main-header {
             font-size: 1.8rem;
+            color: var(--primary);
+            font-weight: 800;
+            margin-bottom: .5rem;
+            letter-spacing: -.3px;
+        }
+        .section-title {
+            font-size: 1.1rem;
             font-weight: 700;
-            margin: 1.5rem 0 1rem 0;
-            padding-left: 10px;
-            border-left: 5px solid #2c3e50;
+            color: var(--primary);
+            padding-left: .8rem;
+            border-left: 4px solid var(--accent);
+            margin: 1.2rem 0 .8rem 0;
         }
         .card {
             background: white;
-            border-radius: 12px;
-            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
-            padding: 1.8rem;
-            margin-bottom: 1.8rem;
+            border-radius: var(--radius);
+            box-shadow: var(--shadow-md);
+            padding: 1.6rem;
+            margin-bottom: 1.4rem;
+            border: 1px solid var(--border);
         }
-        .stButton>button {
+
+        /* ── Metric card custom ── */
+        .metric-card {
+            background: white;
+            border-radius: var(--radius);
+            padding: .9rem 1rem;
+            box-shadow: var(--shadow-sm);
+            border-left: 4px solid var(--accent);
+            margin-bottom: .5rem;
+        }
+
+        /* ── Botões ── */
+        .stButton > button {
             width: 100%;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: .9rem;
+            transition: all .2s ease;
         }
+        .stButton > button:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+
+        /* ── Tabs styling ── */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 4px;
+            background: var(--bg-soft);
+            border-radius: 10px;
+            padding: 4px;
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 7px;
+            font-weight: 600;
+            padding: .45rem 1.1rem;
+            transition: all .18s ease;
+        }
+        .stTabs [aria-selected="true"] {
+            background: white !important;
+            box-shadow: var(--shadow-sm);
+        }
+
+        /* ── Expander ── */
+        .streamlit-expanderHeader {
+            font-weight: 600;
+            color: var(--primary);
+            background: var(--bg-soft);
+            border-radius: var(--radius);
+        }
+
+        /* ── Divider ── */
+        hr { border-color: var(--border); margin: 1.2rem 0; }
+
+        /* ── Radio button group (layout selector) ── */
+        div[data-testid="stRadio"] > div { gap: .5rem; }
+        div[data-testid="stRadio"] label {
+            background: white;
+            border: 1.5px solid var(--border);
+            border-radius: 8px;
+            padding: .6rem 1rem;
+            cursor: pointer;
+            transition: all .18s ease;
+            font-weight: 500;
+        }
+        div[data-testid="stRadio"] label:hover {
+            border-color: var(--accent);
+            background: #EFF6FF;
+        }
+
+        /* ── Spinner animado ── */
         @keyframes spin {
-            0% { transform: rotate(0deg); }
+            0%   { transform: rotate(0deg); }
             100% { transform: rotate(360deg); }
         }
         .spinner {
-            animation: spin 2s linear infinite;
+            animation: spin 1.4s linear infinite;
             display: inline-block;
-            font-size: 24px;
+            font-size: 22px;
         }
-        .main-header {
-            font-size: 2.5rem;
-            color: #1E3A8A;
-            font-weight: bold;
-            margin-bottom: 1rem;
-        }
-        .sub-header {
-            font-size: 1.5rem;
-            color: #2563EB;
-            margin-top: 1.5rem;
-            border-bottom: 2px solid #E5E7EB;
-        }
-        .section-card {
-            background: #FFFFFF;
-            border-radius: 12px;
-            padding: 1.5rem;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            margin-bottom: 1rem;
-            border: 1px solid #E5E7EB;
-        }
-        .success-box {
-            background-color: #d1fae5;
-            color: #065f46;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-        }
-        .info-box {
-            background-color: #dbeafe;
-            color: #1e40af;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-        }
-        .warning-box {
-            background-color: #fef3c7;
-            color: #92400e;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-        }
-        .stButton>button {
-            width: 100%;
-            border-radius: 5px;
-            font-weight: bold;
-        }
-        .metric-card {
-            background: white;
-            border-radius: 8px;
-            padding: 1rem;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            border-left: 4px solid #3498db;
-            margin-bottom: 0.5rem;
+
+        /* ── Responsividade ── */
+        @media (max-width: 768px) {
+            .cover-title  { font-size: 1.7rem; }
+            .cover-container { padding: 1.5rem; }
+            .section-card { padding: 1rem; }
         }
     </style>
     """, unsafe_allow_html=True)
@@ -687,7 +819,193 @@ def processador_cte():
 
 
 # ==============================================================================
-# PARTE 3: PARSER SIGRAWEB (SUBSTITUI HAFELE/EXTRATO DUIMP APP2)
+# PARTE 3A: PARSER EXTRATO DUIMP — LAYOUT ANTIGO (APP2 original / HafelePDFParser)
+# ==============================================================================
+class HafelePDFParser:
+    """
+    Parser BLINDADO para o layout Extrato DUIMP (APP2 original).
+    Otimizado para não travar a memória em PDFs com milhares de páginas.
+    """
+
+    def __init__(self):
+        self.documento = {
+            'cabecalho': {},
+            'itens': [],
+            'totais': {}
+        }
+
+    @staticmethod
+    def _parse_valor(valor_str: str) -> float:
+        try:
+            if not valor_str:
+                return 0.0
+            limpo = valor_str.strip().replace('.', '').replace(',', '.')
+            return float(limpo)
+        except:
+            return 0.0
+
+    def parse_pdf(self, pdf_path: str) -> Dict:
+        try:
+            logger.info(f"Iniciando parsing Extrato DUIMP (layout antigo): {pdf_path}")
+            text_chunks = []
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+
+            with pdfplumber.open(pdf_path) as pdf:
+                total_pages = len(pdf.pages)
+                for i, page in enumerate(pdf.pages):
+                    progress_text.text(f"Lendo página {i+1} de {total_pages} do Extrato Detalhado...")
+                    progress_bar.progress((i + 1) / total_pages)
+                    text = page.extract_text(layout=False)
+                    if text:
+                        text_chunks.append(text)
+
+            progress_text.empty()
+            progress_bar.empty()
+
+            full_text = "\n".join(text_chunks)
+            self._process_full_text(full_text)
+
+            del text_chunks
+            del full_text
+            gc.collect()
+
+            return self.documento
+
+        except Exception as e:
+            logger.error(f"Erro CRÍTICO no parsing Extrato DUIMP: {str(e)}")
+            st.error(f"Erro ao ler o arquivo PDF: {str(e)}")
+            return self.documento
+
+    def _process_full_text(self, text: str):
+        chunks = re.split(r'(ITENS\s+DA\s+DUIMP\s*-\s*\d+)', text, flags=re.IGNORECASE)
+        items_found = []
+
+        if len(chunks) > 1:
+            for i in range(1, len(chunks), 2):
+                header  = chunks[i]
+                content = chunks[i + 1] if (i + 1) < len(chunks) else ''
+                item_num_match = re.search(r'(\d+)', header)
+                item_num = int(item_num_match.group(1)) if item_num_match else i
+                item_data = self._parse_item_block(item_num, content)
+                if item_data:
+                    items_found.append(item_data)
+        else:
+            st.warning("⚠️ O sistema não detectou o padrão 'ITENS DA DUIMP'. Verifique se o PDF está no formato correto.")
+
+        self.documento['itens'] = items_found
+        self._calculate_totals()
+
+    def _parse_item_block(self, item_num: int, text: str) -> Dict:
+        try:
+            pv = self._parse_valor
+            item = {
+                'numero_item': item_num,
+                'numeroAdicao': str(item_num).zfill(3),
+                'ncm': '', 'codigo_interno': '', 'nome_produto': '',
+                'quantidade': 0.0, 'quantidade_comercial': 0.0,
+                'peso_liquido': 0.0, 'valor_total': 0.0,
+                'ii_valor_devido': 0.0, 'ii_base_calculo': 0.0, 'ii_aliquota': 0.0,
+                'ipi_valor_devido': 0.0, 'ipi_base_calculo': 0.0, 'ipi_aliquota': 0.0,
+                'pis_valor_devido': 0.0, 'pis_base_calculo': 0.0, 'pis_aliquota': 0.0,
+                'cofins_valor_devido': 0.0, 'cofins_base_calculo': 0.0, 'cofins_aliquota': 0.0,
+                'frete_internacional': 0.0, 'seguro_internacional': 0.0,
+                'local_aduaneiro': 0.0,
+                # aliases para compatibilidade com o merge
+                'aduaneiro_reais': 0.0,
+                'valorAduaneiroReal': 0.0,
+                'paisOrigem': '', 'fornecedor_raw': '', 'endereco_raw': '',
+                'unidade': 'UNIDADE', 'pesoLiq': '0', 'valorTotal': '0', 'valorUnit': '0',
+                'moeda': 'EURO/COM.EUROPEIA',
+            }
+
+            code_match = re.search(r'Código interno\s*([\d\.]+)', text, re.IGNORECASE)
+            if code_match:
+                item['codigo_interno'] = code_match.group(1).replace('.', '')
+
+            ncm_match = re.search(r'(\d{4}\.\d{2}\.\d{2})', text)
+            if ncm_match:
+                item['ncm'] = ncm_match.group(1).replace('.', '')
+
+            qtd_com_match = re.search(r'Qtde Unid\. Comercial\s*([\d\.,]+)', text)
+            if qtd_com_match:
+                item['quantidade_comercial'] = pv(qtd_com_match.group(1))
+
+            qtd_est_match = re.search(r'Qtde Unid\. Estatística\s*([\d\.,]+)', text)
+            if qtd_est_match:
+                item['quantidade'] = pv(qtd_est_match.group(1))
+            else:
+                item['quantidade'] = item['quantidade_comercial']
+
+            val_match = re.search(r'Valor Tot\. Cond Venda\s*([\d\.,]+)', text)
+            if val_match:
+                item['valor_total'] = pv(val_match.group(1))
+                item['valorTotal']  = val_match.group(1)
+
+            peso_match = re.search(r'Peso Líquido \(KG\)\s*([\d\.,]+)', text, re.IGNORECASE)
+            if peso_match:
+                item['peso_liquido'] = pv(peso_match.group(1))
+                item['pesoLiq']      = peso_match.group(1)
+
+            frete_match = re.search(r'Frete Internac\. \(R\$\)\s*([\d\.,]+)', text)
+            if frete_match:
+                item['frete_internacional'] = pv(frete_match.group(1))
+
+            seg_match = re.search(r'Seguro Internac\. \(R\$\)\s*([\d\.,]+)', text)
+            if seg_match:
+                item['seguro_internacional'] = pv(seg_match.group(1))
+
+            aduana_match = re.search(r'Local Aduaneiro \(R\$\)\s*([\d\.,]+)', text)
+            if aduana_match:
+                item['local_aduaneiro']     = pv(aduana_match.group(1))
+                item['aduaneiro_reais']     = item['local_aduaneiro']
+                item['valorAduaneiroReal']  = item['local_aduaneiro']
+
+            # Impostos via regex de padrão tabular
+            tax_patterns = re.findall(
+                r'Base de Cálculo.*?\(R\$\)\s*([\d\.,]+).*?% Alíquota\s*([\d\.,]+).*?Valor.*?(?:Devido|A Recolher|Calculado).*?\(R\$\)\s*([\d\.,]+)',
+                text, re.DOTALL | re.IGNORECASE
+            )
+            for base_str, aliq_str, val_str in tax_patterns:
+                base = pv(base_str); aliq = pv(aliq_str); val = pv(val_str)
+                if 1.60 <= aliq <= 3.00:
+                    item['pis_aliquota'] = aliq; item['pis_base_calculo'] = base; item['pis_valor_devido'] = val
+                elif 7.00 <= aliq <= 12.00:
+                    item['cofins_aliquota'] = aliq; item['cofins_base_calculo'] = base; item['cofins_valor_devido'] = val
+                elif aliq > 12.00:
+                    item['ii_aliquota'] = aliq; item['ii_base_calculo'] = base; item['ii_valor_devido'] = val
+                elif aliq >= 0:
+                    if item['ipi_aliquota'] == 0:
+                        item['ipi_aliquota'] = aliq; item['ipi_base_calculo'] = base; item['ipi_valor_devido'] = val
+
+            item['total_impostos'] = (item['ii_valor_devido'] + item['ipi_valor_devido'] +
+                                      item['pis_valor_devido'] + item['cofins_valor_devido'])
+            item['valor_total_com_impostos'] = item['valor_total'] + item['total_impostos']
+            return item
+
+        except Exception as e:
+            logger.error(f"Erro item {item_num}: {e}")
+            return None
+
+    def _calculate_totals(self):
+        if self.documento['itens']:
+            itens = self.documento['itens']
+            pv = self._parse_valor
+            self.documento['totais'] = {
+                'valor_total_mercadoria': sum(i['valor_total'] for i in itens),
+                'total_valor_aduaneiro':  sum(i.get('aduaneiro_reais', 0) for i in itens),
+                'total_ii':    sum(i['ii_valor_devido'] for i in itens),
+                'total_ipi':   sum(i['ipi_valor_devido'] for i in itens),
+                'total_pis':   sum(i['pis_valor_devido'] for i in itens),
+                'total_cofins': sum(i['cofins_valor_devido'] for i in itens),
+                'total_frete':  sum(i['frete_internacional'] for i in itens),
+                'total_seguro': sum(i['seguro_internacional'] for i in itens),
+                'quantidade_adicoes': len(itens),
+            }
+
+
+# ==============================================================================
+# PARTE 3B: PARSER SIGRAWEB — LAYOUT NOVO (Conferência do Processo Detalhado)
 # ==============================================================================
 class SigrawebPDFParser:
     """
@@ -1778,9 +2096,572 @@ class XMLBuilder:
 
 
 # ==============================================================================
-# PARTE 6: SISTEMA INTEGRADO DUIMP (COM SIGRAWEB NO LUGAR DO APP2)
+# PARTE 6: SISTEMA INTEGRADO DUIMP — SUPORTE AOS DOIS LAYOUTS DE APP2
 # ==============================================================================
+
+def _merge_app2_items(df_dest: pd.DataFrame, itens: list) -> tuple:
+    """
+    Popula as colunas fiscais do df_dest a partir da lista de itens do APP2.
+    Funciona tanto com HafelePDFParser quanto com SigrawebPDFParser,
+    pois ambos produzem chaves compatíveis.
+    """
+    src_map: Dict[int, Dict] = {}
+    for item in itens:
+        try:
+            src_map[int(item['numero_item'])] = item
+        except Exception:
+            pass
+
+    count, not_found = 0, []
+    for idx, row in df_dest.iterrows():
+        try:
+            item_num = int(str(row['numeroAdicao']).strip())
+            if item_num not in src_map:
+                not_found.append(item_num)
+                continue
+            src = src_map[item_num]
+
+            df_dest.at[idx, 'NUMBER']           = src.get('codigo_interno', '')
+            df_dest.at[idx, 'Frete (R$)']       = src.get('frete_internacional', 0.0)
+            df_dest.at[idx, 'Seguro (R$)']      = src.get('seguro_internacional', 0.0)
+            df_dest.at[idx, 'Aduaneiro (R$)']   = src.get('aduaneiro_reais',
+                                                    src.get('valorAduaneiroReal',
+                                                    src.get('local_aduaneiro', 0.0)))
+            df_dest.at[idx, 'II (R$)']          = src.get('ii_valor_devido', 0.0)
+            df_dest.at[idx, 'II Base (R$)']     = src.get('ii_base_calculo',
+                                                    src.get('aduaneiro_reais',
+                                                    src.get('valorAduaneiroReal', 0.0)))
+            df_dest.at[idx, 'II Alíq. (%)']     = src.get('ii_aliquota', 0.0)
+            df_dest.at[idx, 'IPI (R$)']         = src.get('ipi_valor_devido', 0.0)
+            df_dest.at[idx, 'IPI Base (R$)']    = src.get('ipi_base_calculo', 0.0)
+            df_dest.at[idx, 'IPI Alíq. (%)']    = src.get('ipi_aliquota', 0.0)
+            df_dest.at[idx, 'PIS (R$)']         = src.get('pis_valor_devido', 0.0)
+            df_dest.at[idx, 'PIS Base (R$)']    = src.get('pis_base_calculo', 0.0)
+            df_dest.at[idx, 'PIS Alíq. (%)']    = src.get('pis_aliquota', 0.0)
+            df_dest.at[idx, 'COFINS (R$)']      = src.get('cofins_valor_devido', 0.0)
+            df_dest.at[idx, 'COFINS Base (R$)'] = src.get('cofins_base_calculo', 0.0)
+            df_dest.at[idx, 'COFINS Alíq. (%)'] = src.get('cofins_aliquota', 0.0)
+            count += 1
+        except Exception:
+            continue
+
+    return df_dest, count, not_found
+
+
+def _render_totais_grade(df: pd.DataFrame):
+    """Renderiza métricas de totais da grade editada."""
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
+    def _s(col): return pd.to_numeric(df[col], errors='coerce').sum() if col in df.columns else 0
+    t1.metric("II Total",      f"R$ {_s('II (R$)'):,.2f}")
+    t2.metric("IPI Total",     f"R$ {_s('IPI (R$)'):,.2f}")
+    t3.metric("PIS Total",     f"R$ {_s('PIS (R$)'):,.2f}")
+    t4.metric("COFINS Total",  f"R$ {_s('COFINS (R$)'):,.2f}")
+    t5.metric("Frete Total",   f"R$ {_s('Frete (R$)'):,.2f}")
+    t6.metric("Seguro Total",  f"R$ {_s('Seguro (R$)'):,.2f}")
+
+
 def sistema_integrado_duimp():
+    st.markdown(
+        '<div class="main-header">📊 Sistema Integrado DUIMP 2026</div>',
+        unsafe_allow_html=True
+    )
+
+    tab1, tab2, tab3 = st.tabs([
+        "📂 Upload e Vinculação",
+        "📋 Conferência Detalhada",
+        "💾 Exportar XML"
+    ])
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 1 — UPLOAD E VINCULAÇÃO
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab1:
+
+        # ── Seletor de layout do APP2 ──────────────────────────────────────
+        st.markdown('<div class="section-title">⚙️ Formato do Arquivo de Tributos (APP2)</div>',
+                    unsafe_allow_html=True)
+
+        col_sel1, col_sel2 = st.columns([2, 1])
+        with col_sel1:
+            layout_choice = st.radio(
+                "Selecione o layout do segundo arquivo (APP2):",
+                options=["🔵  Sigraweb — Conferência do Processo Detalhado (layout novo)",
+                         "🟠  Extrato DUIMP — Itens da DUIMP (layout antigo)"],
+                index=0 if st.session_state["layout_app2"] == "sigraweb" else 1,
+                key="layout_radio",
+                horizontal=False,
+            )
+            novo_layout = "sigraweb" if layout_choice.startswith("🔵") else "extrato_duimp"
+            if novo_layout != st.session_state["layout_app2"]:
+                # troca de layout → limpa parser e dados vinculados
+                st.session_state["layout_app2"]     = novo_layout
+                st.session_state["parsed_sigraweb"] = None
+                st.session_state["merged_df"]       = None
+                st.rerun()
+
+        with col_sel2:
+            layout_badge = ("🔵 Sigraweb" if st.session_state["layout_app2"] == "sigraweb"
+                            else "🟠 Extrato DUIMP")
+            st.markdown(f"""
+            <div class="layout-card layout-card-active">
+                <b>Layout ativo:</b><br>
+                <span style="font-size:1.15rem;font-weight:700;">{layout_badge}</span>
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Upload dos dois arquivos ───────────────────────────────────────
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            st.info("**Passo 1 —** Extrato DUIMP (Siscomex)")
+            file_duimp = st.file_uploader("Arquivo DUIMP (.pdf)", type="pdf", key="u1")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        with col2:
+            st.markdown('<div class="section-card">', unsafe_allow_html=True)
+            if st.session_state["layout_app2"] == "sigraweb":
+                st.info("**Passo 2 —** Sigraweb · Conferência Detalhada")
+                label_u2 = "Arquivo Sigraweb (.pdf)"
+            else:
+                st.info("**Passo 2 —** Extrato DUIMP · Itens da DUIMP")
+                label_u2 = "Arquivo Extrato DUIMP (.pdf)"
+            file_app2 = st.file_uploader(label_u2, type="pdf", key="u2")
+            st.markdown('</div>', unsafe_allow_html=True)
+
+        # ── Processamento APP1 (DUIMP) ────────────────────────────────────
+        if file_duimp:
+            if (st.session_state["parsed_duimp"] is None or
+                    file_duimp.name != getattr(st.session_state.get("last_duimp"), "name", "")):
+                try:
+                    p = DuimpPDFParser(file_duimp.read())
+                    p.preprocess()
+                    p.extract_header()
+                    p.extract_items()
+                    st.session_state["parsed_duimp"] = p
+                    st.session_state["last_duimp"]   = file_duimp
+
+                    df = pd.DataFrame(p.items)
+                    cols_fiscais = [
+                        "NUMBER", "Frete (R$)", "Seguro (R$)",
+                        "II (R$)", "II Base (R$)", "II Alíq. (%)",
+                        "IPI (R$)", "IPI Base (R$)", "IPI Alíq. (%)",
+                        "PIS (R$)", "PIS Base (R$)", "PIS Alíq. (%)",
+                        "COFINS (R$)", "COFINS Base (R$)", "COFINS Alíq. (%)",
+                        "Aduaneiro (R$)"
+                    ]
+                    for col in cols_fiscais:
+                        df[col] = 0.00 if col != "NUMBER" else ""
+                    st.session_state["merged_df"] = df
+                    st.markdown(
+                        f'<div class="success-box">✅ DUIMP lida — {len(p.items)} adições encontradas.</div>',
+                        unsafe_allow_html=True
+                    )
+                except Exception as e:
+                    st.error(f"Erro ao ler DUIMP: {e}")
+
+        # ── Processamento APP2 (Sigraweb ou Extrato DUIMP) ────────────────
+        if file_app2 and st.session_state["parsed_sigraweb"] is None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                tmp.write(file_app2.getvalue())
+                tmp_path = tmp.name
+
+            try:
+                if st.session_state["layout_app2"] == "sigraweb":
+                    parser_app2 = SigrawebPDFParser()
+                else:
+                    parser_app2 = HafelePDFParser()
+
+                doc_app2 = parser_app2.parse_pdf(tmp_path)
+                st.session_state["parsed_sigraweb"] = doc_app2
+
+                qtd_itens = len(doc_app2['itens'])
+                if qtd_itens > 0:
+                    layout_name = ("Sigraweb" if st.session_state["layout_app2"] == "sigraweb"
+                                   else "Extrato DUIMP")
+                    st.markdown(
+                        f'<div class="success-box">✅ {layout_name} lido — '
+                        f'{qtd_itens} itens/adições encontrados.</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    # Resumo rápido apenas para Sigraweb (tem cabeçalho rico)
+                    if st.session_state["layout_app2"] == "sigraweb":
+                        cab = doc_app2.get('cabecalho', {})
+                        tot = doc_app2.get('totais', {})
+                        with st.expander("📋 Resumo do Processo (Sigraweb)", expanded=True):
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Número DI",       cab.get('numeroDI', 'N/A'))
+                            c2.metric("Adições",         qtd_itens)
+                            c3.metric("Peso Bruto (kg)", cab.get('pesoBruto', 'N/A'))
+                            c4.metric("Via Transporte",  cab.get('viaTransporte', 'N/A'))
+                            m1, m2, m3, m4 = st.columns(4)
+                            m1.metric("II Total (R$)",       f"R$ {tot.get('total_ii', 0):,.2f}")
+                            m2.metric("IPI Total (R$)",      f"R$ {tot.get('total_ipi', 0):,.2f}")
+                            m3.metric("PIS Total (R$)",      f"R$ {tot.get('total_pis', 0):,.2f}")
+                            m4.metric("COFINS Total (R$)",   f"R$ {tot.get('total_cofins', 0):,.2f}")
+                            n1, n2, n3, n4 = st.columns(4)
+                            n1.metric("Vlr Adu. Total (R$)", f"R$ {tot.get('total_valor_aduaneiro', 0):,.2f}")
+                            n2.metric("Frete Total (R$)",    f"R$ {tot.get('total_frete', 0):,.2f}")
+                            n3.metric("Seguro Total (R$)",   f"R$ {tot.get('total_seguro', 0):,.2f}")
+                            n4.metric("Peso Líq. Total (kg)",f"{tot.get('peso_liquido_total', 0):,.2f}")
+                    else:
+                        # Extrato DUIMP — resumo simples
+                        tot = doc_app2.get('totais', {})
+                        with st.expander("📋 Resumo do Extrato DUIMP", expanded=True):
+                            e1, e2, e3, e4 = st.columns(4)
+                            e1.metric("Itens",            qtd_itens)
+                            e2.metric("II Total (R$)",    f"R$ {tot.get('total_ii', 0):,.2f}")
+                            e3.metric("PIS Total (R$)",   f"R$ {tot.get('total_pis', 0):,.2f}")
+                            e4.metric("COFINS Total (R$)",f"R$ {tot.get('total_cofins', 0):,.2f}")
+                else:
+                    st.warning(
+                        "O PDF foi lido, mas nenhum item foi detectado automaticamente. "
+                        "Verifique se o layout selecionado está correto."
+                    )
+
+            except Exception as e:
+                st.error(f"Erro ao ler APP2: {e}")
+                st.code(traceback.format_exc())
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+        # ── Botões de reset ────────────────────────────────────────────────
+        col_r1, col_r2, col_r3 = st.columns(3)
+        with col_r1:
+            if st.button("🔄 Recarregar DUIMP", type="secondary"):
+                st.session_state["parsed_duimp"] = None
+                st.session_state["merged_df"]    = None
+                st.rerun()
+        with col_r2:
+            if st.button("🔄 Recarregar APP2", type="secondary"):
+                st.session_state["parsed_sigraweb"] = None
+                st.rerun()
+        with col_r3:
+            if st.button("🗑️ Limpar Tudo", type="secondary"):
+                for k in ["parsed_duimp", "parsed_sigraweb", "merged_df", "last_duimp"]:
+                    st.session_state[k] = None
+                st.rerun()
+
+        st.divider()
+
+        # ── Vinculação ─────────────────────────────────────────────────────
+        if st.button("🔗 VINCULAR DADOS (Cruzamento Automático)",
+                     type="primary", use_container_width=True):
+            if st.session_state["merged_df"] is not None and \
+               st.session_state["parsed_sigraweb"] is not None:
+                try:
+                    doc_app2 = st.session_state["parsed_sigraweb"]
+                    df_dest  = st.session_state["merged_df"].copy()
+                    df_dest, count, not_found = _merge_app2_items(df_dest, doc_app2['itens'])
+                    st.session_state["merged_df"] = df_dest
+                    st.success(f"✅ **{count}** adições vinculadas com sucesso.")
+                    if not_found:
+                        st.warning(f"⚠️ {len(not_found)} adição(ões) não encontrada(s) no APP2: {not_found}")
+
+                    # Resumo dos valores vinculados
+                    with st.expander("📊 Resumo dos Valores Vinculados", expanded=True):
+                        _render_totais_grade(df_dest)
+                except Exception as e:
+                    st.error(f"Erro na vinculação: {e}")
+                    st.code(traceback.format_exc())
+            else:
+                st.warning("Carregue os dois arquivos antes de vincular.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 2 — CONFERÊNCIA DETALHADA
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab2:
+        st.markdown('<div class="section-title">📋 Conferência e Edição dos Dados Vinculados</div>',
+                    unsafe_allow_html=True)
+
+        # Painel de detalhes do APP2 lido
+        doc_app2 = st.session_state.get("parsed_sigraweb")
+        if doc_app2:
+            itens_app2 = doc_app2.get('itens', [])
+
+            # Cabeçalho Sigraweb (rico) ou info básica Extrato DUIMP
+            if st.session_state["layout_app2"] == "sigraweb":
+                cab = doc_app2.get('cabecalho', {})
+                with st.expander("📄 Dados do Processo — Sigraweb", expanded=False):
+                    dados_cab = {
+                        "Campo": ["Número DI","SIGRAWEB ID","Empresa","CNPJ","URF Entrada",
+                                  "Via Transporte","País Procedência","Incoterms",
+                                  "IDT Conhecimento","IDT Master","Data Embarque",
+                                  "Data Chegada","Data Registro","Peso Bruto (kg)",
+                                  "Peso Líquido (kg)","Volumes","Embalagem",
+                                  "Banco","Agência","Taxa EUR","Taxa USD",
+                                  "FOB EUR","FOB BRL","Frete USD","Frete BRL",
+                                  "Seguro USD","Seguro BRL","CIF USD","CIF BRL",
+                                  "Vlr Aduaneiro USD","Vlr Aduaneiro BRL"],
+                        "Valor": [
+                            cab.get('numeroDI',''), cab.get('sigraweb',''),
+                            cab.get('nomeImportador',''), cab.get('cnpj',''),
+                            cab.get('urf',''), cab.get('viaTransporte',''),
+                            cab.get('paisProcedencia',''), cab.get('incoterms',''),
+                            cab.get('idtConhecimento',''), cab.get('idtMaster',''),
+                            cab.get('dataEmbarque',''), cab.get('dataChegada',''),
+                            cab.get('dataRegistro',''), cab.get('pesoBruto',''),
+                            cab.get('pesoLiquido',''), cab.get('volumes',''),
+                            cab.get('embalagem',''), cab.get('banco',''),
+                            cab.get('agencia',''), cab.get('taxaEUR',''),
+                            cab.get('taxaDolar',''), cab.get('fobEUR',''),
+                            cab.get('fobBRL',''), cab.get('freteUSD',''),
+                            cab.get('freteBRL',''), cab.get('seguroUSD',''),
+                            cab.get('seguroBRL',''), cab.get('cifUSD',''),
+                            cab.get('cifBRL',''), cab.get('valorAduaneiroUSD',''),
+                            cab.get('valorAduaneiroBRL',''),
+                        ]
+                    }
+                    st.dataframe(pd.DataFrame(dados_cab), use_container_width=True, hide_index=True)
+
+            # Tabela de adições do APP2
+            with st.expander(
+                f"📑 Adições Extraídas — "
+                f"{'Sigraweb' if st.session_state['layout_app2']=='sigraweb' else 'Extrato DUIMP'}",
+                expanded=False
+            ):
+                if itens_app2:
+                    df_app2_view = pd.DataFrame([{
+                        'Adição':          it.get('numeroAdicao', ''),
+                        'Part Number':     it.get('codigo_interno', ''),
+                        'NCM':             it.get('ncm', ''),
+                        'Descrição':       str(it.get('descricao', it.get('nome_produto', '')))[:60],
+                        'País Origem':     it.get('paisOrigem', ''),
+                        'Qtd Estat.':      it.get('quantidade', 0),
+                        'Qtd Comerc.':     it.get('quantidade_comercial', 0),
+                        'Unidade':         it.get('unidade', ''),
+                        'Peso Líq.(kg)':   it.get('pesoLiq', it.get('peso_liquido', 0)),
+                        'Vlr Adu. BRL':    it.get('aduaneiro_reais', it.get('valorAduaneiroReal', it.get('local_aduaneiro', 0))),
+                        'Frete BRL':       it.get('frete_internacional', 0),
+                        'Seguro BRL':      it.get('seguro_internacional', 0),
+                        'II %':            it.get('ii_aliquota', 0),
+                        'II Base R$':      it.get('ii_base_calculo', 0),
+                        'II R$':           it.get('ii_valor_devido', 0),
+                        'IPI %':           it.get('ipi_aliquota', 0),
+                        'IPI R$':          it.get('ipi_valor_devido', 0),
+                        'PIS %':           it.get('pis_aliquota', 0),
+                        'PIS R$':          it.get('pis_valor_devido', 0),
+                        'COFINS %':        it.get('cofins_aliquota', 0),
+                        'COFINS R$':       it.get('cofins_valor_devido', 0),
+                        'Total Impostos':  it.get('total_impostos', 0),
+                    } for it in itens_app2])
+                    st.dataframe(df_app2_view, use_container_width=True, height=380)
+                    # Totais rápidos da tabela APP2
+                    tt1, tt2, tt3, tt4, tt5 = st.columns(5)
+                    tt1.metric("Vlr Adu. BRL Total", f"R$ {df_app2_view['Vlr Adu. BRL'].sum():,.2f}")
+                    tt2.metric("II Total",            f"R$ {df_app2_view['II R$'].sum():,.2f}")
+                    tt3.metric("IPI Total",           f"R$ {df_app2_view['IPI R$'].sum():,.2f}")
+                    tt4.metric("PIS Total",           f"R$ {df_app2_view['PIS R$'].sum():,.2f}")
+                    tt5.metric("COFINS Total",        f"R$ {df_app2_view['COFINS R$'].sum():,.2f}")
+                else:
+                    st.info("Nenhum item extraído do APP2.")
+
+        # ── Grade de edição principal ──────────────────────────────────────
+        if st.session_state["merged_df"] is not None:
+            st.markdown('<div class="section-title">✏️ Grade de Edição — DUIMP + APP2 Vinculados</div>',
+                        unsafe_allow_html=True)
+            col_config = {
+                "numeroAdicao": st.column_config.TextColumn("Item",      width="small",  disabled=True),
+                "NUMBER":       st.column_config.TextColumn("Part Number", width="medium"),
+                "ncm":          st.column_config.TextColumn("NCM",       width="small",  disabled=True),
+                "descricao":    st.column_config.TextColumn("Descrição", width="large",  disabled=True),
+                "quantidade":   st.column_config.TextColumn("Qtd Est.",  disabled=True),
+                "quantidade_comercial": st.column_config.TextColumn("Qtd Com.", disabled=True),
+                "unidade":      st.column_config.TextColumn("Unidade",   disabled=True),
+                "pesoLiq":      st.column_config.TextColumn("Peso Líq.", disabled=True),
+                "valorTotal":   st.column_config.TextColumn("FOB",       disabled=True),
+                "Frete (R$)":   st.column_config.NumberColumn(format="R$ %.2f"),
+                "Seguro (R$)":  st.column_config.NumberColumn(format="R$ %.2f"),
+                "Aduaneiro (R$)": st.column_config.NumberColumn("Vlr Adu.(R$)", format="R$ %.2f"),
+                "II Base (R$)": st.column_config.NumberColumn("II Base",  format="R$ %.2f"),
+                "II Alíq. (%)": st.column_config.NumberColumn("II %",    format="%.4f"),
+                "II (R$)":      st.column_config.NumberColumn("II R$",   format="R$ %.2f"),
+                "IPI Base (R$)":st.column_config.NumberColumn("IPI Base", format="R$ %.2f"),
+                "IPI Alíq. (%)":st.column_config.NumberColumn("IPI %",   format="%.4f"),
+                "IPI (R$)":     st.column_config.NumberColumn("IPI R$",  format="R$ %.2f"),
+                "PIS Base (R$)":st.column_config.NumberColumn("PIS Base", format="R$ %.2f"),
+                "PIS Alíq. (%)":st.column_config.NumberColumn("PIS %",   format="%.4f"),
+                "PIS (R$)":     st.column_config.NumberColumn("PIS R$",  format="R$ %.2f"),
+                "COFINS Base (R$)": st.column_config.NumberColumn("COF Base", format="R$ %.2f"),
+                "COFINS Alíq. (%)": st.column_config.NumberColumn("COF %",    format="%.4f"),
+                "COFINS (R$)":      st.column_config.NumberColumn("COF R$",   format="R$ %.2f"),
+            }
+            edited_df = st.data_editor(
+                st.session_state["merged_df"],
+                hide_index=True, column_config=col_config,
+                use_container_width=True, height=600
+            )
+            # Recalcular impostos em tempo real
+            for tax in ['II', 'IPI', 'PIS', 'COFINS']:
+                bc = f"{tax} Base (R$)"; ac = f"{tax} Alíq. (%)"; vc = f"{tax} (R$)"
+                if bc in edited_df.columns and ac in edited_df.columns:
+                    edited_df[bc] = pd.to_numeric(edited_df[bc], errors='coerce').fillna(0.0)
+                    edited_df[ac] = pd.to_numeric(edited_df[ac], errors='coerce').fillna(0.0)
+                    edited_df[vc] = edited_df[bc] * (edited_df[ac] / 100.0)
+            st.session_state["merged_df"] = edited_df
+
+            st.markdown('<div class="section-title">📊 Totais da Grade</div>', unsafe_allow_html=True)
+            _render_totais_grade(edited_df)
+        else:
+            st.info("Realize o upload e a vinculação na aba **Upload e Vinculação**.")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3 — EXPORTAR XML
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab3:
+        st.markdown('<div class="section-title">⚙️ Configurações do XML Final</div>',
+                    unsafe_allow_html=True)
+
+        # Preenche automaticamente com dados do Sigraweb quando disponível
+        cab_sgw = {}
+        if (st.session_state.get("parsed_sigraweb") and
+                st.session_state["layout_app2"] == "sigraweb"):
+            cab_sgw = st.session_state["parsed_sigraweb"].get("cabecalho", {})
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            st.markdown("**📦 Quantidade**")
+            _vol = cab_sgw.get('volumes', '')
+            inp_qtd_volume = st.text_input(
+                "Quantidade Volume",
+                value=str(_vol).zfill(5) if _vol else '00001',
+                help="Preenche <quantidadeVolume>"
+            )
+            st.markdown("**📅 Datas (YYYYMMDD)**")
+            inp_dt_chegada = st.text_input("Data Chegada",    value=cab_sgw.get('dataChegadaISO',  '20251120') or '20251120')
+            inp_dt_desemb  = st.text_input("Data Desembaraço",value=cab_sgw.get('dataRegistro',    '20251124') or '20251124')
+            inp_dt_reg     = st.text_input("Data Registro",   value=cab_sgw.get('dataRegistro',    '20251124') or '20251124')
+            inp_dt_emb     = st.text_input("Data Embarque",   value=cab_sgw.get('dataEmbarqueISO', '20251025') or '20251025')
+
+        with c2:
+            st.markdown("**⚖️ Pesos (formato XML)**")
+            _pb = DataFormatter.format_quantity(cab_sgw.get('pesoBruto','0'),  15) if cab_sgw.get('pesoBruto')  else '000000000000000'
+            _pl = DataFormatter.format_quantity(cab_sgw.get('pesoLiquido','0'),15) if cab_sgw.get('pesoLiquido') else '000000000000000'
+            inp_peso_bruto = st.text_input("Peso Bruto (XML)",   value=_pb)
+            inp_peso_liq   = st.text_input("Peso Líquido (XML)", value=_pl)
+            st.markdown("**📍 Locais (R$ / US$)**")
+            inp_loc_desc_dol = st.text_input("Local Descarga US$", value="000000000000000")
+            inp_loc_desc_rea = st.text_input("Local Descarga R$",  value="000000000000000")
+            inp_loc_emb_dol  = st.text_input("Local Embarque US$", value="000000000000000")
+            inp_loc_emb_rea  = st.text_input("Local Embarque R$",  value="000000000000000")
+
+        with c3:
+            st.markdown("**🏦 Pagamento / Siscomex**")
+            inp_agencia = st.text_input("Agência", value=cab_sgw.get('agencia','3715') or '3715')
+            inp_banco   = st.text_input("Banco",   value="341")
+            st.markdown("---")
+            st.markdown("**🔖 Conhecimento de Carga**")
+            inp_idt_conhec = st.text_input("IDT Conhecimento", value=cab_sgw.get('idtConhecimento','CE123456') or 'CE123456')
+            inp_idt_master = st.text_input("IDT Master",       value=cab_sgw.get('idtMaster','CE123456')       or 'CE123456')
+            st.markdown("---")
+            st.markdown("**💰 Receita 7811**")
+            inp_valor_7811 = st.text_input("Valor Receita 7811", value="000000000000000")
+
+        user_xml_config = {
+            "quantidadeVolume":              inp_qtd_volume,
+            "cargaDataChegada":              inp_dt_chegada,
+            "dataDesembaraco":               inp_dt_desemb,
+            "dataRegistro":                  inp_dt_reg,
+            "conhecimentoCargaEmbarqueData": inp_dt_emb,
+            "cargaPesoBruto":                inp_peso_bruto,
+            "cargaPesoLiquido":              inp_peso_liq,
+            "agenciaPagamento":              inp_agencia,
+            "bancoPagamento":                inp_banco,
+            "valorReceita7811":              inp_valor_7811,
+            "localDescargaTotalDolares":     inp_loc_desc_dol,
+            "localDescargaTotalReais":       inp_loc_desc_rea,
+            "localEmbarqueTotalDolares":     inp_loc_emb_dol,
+            "localEmbarqueTotalReais":       inp_loc_emb_rea,
+            "conhecimentoCargaId":           inp_idt_conhec,
+            "conhecimentoCargaIdMaster":     inp_idt_master,
+        }
+
+        st.divider()
+
+        if st.session_state["merged_df"] is not None:
+            if st.button("⚙️ Gerar XML (Layout 8686)", type="primary", use_container_width=True):
+                try:
+                    p       = st.session_state["parsed_duimp"]
+                    records = st.session_state["merged_df"].to_dict("records")
+                    for i, item in enumerate(p.items):
+                        if i < len(records):
+                            item.update(records[i])
+
+                    builder   = XMLBuilder(p)
+                    xml_bytes = builder.build(user_inputs=user_xml_config)
+
+                    duimp_num = p.header.get("numeroDUIMP", "0000").replace("/", "-")
+                    file_name = f"DUIMP_{duimp_num}_INTEGRADO.xml"
+
+                    st.download_button(
+                        label="⬇️ Baixar XML",
+                        data=xml_bytes, file_name=file_name, mime="text/xml"
+                    )
+                    st.success("✅ XML gerado com sucesso!")
+
+                    with st.expander("👁️ Preview XML (primeiros 3000 caracteres)"):
+                        st.code(xml_bytes.decode('utf-8', errors='ignore')[:3000], language='xml')
+
+                except Exception as e:
+                    st.error(f"Erro na geração do XML: {e}")
+                    st.code(traceback.format_exc())
+        else:
+            st.warning("Realize o upload e a vinculação antes de gerar o XML.")
+
+
+# ==============================================================================
+# APLICAÇÃO PRINCIPAL
+# ==============================================================================
+def main():
+    load_css()
+
+    # ── Hero banner ────────────────────────────────────────────────────────
+    st.markdown("""
+    <div class="cover-container">
+        <img src="https://raw.githubusercontent.com/DaniloNs-creator/final/7ea6ab2a610ef8f0c11be3c34f046e7ff2cdfc6a/haefele_logo.png"
+             class="cover-logo">
+        <h1 class="cover-title">Sistema de Processamento Unificado 2026</h1>
+        <p class="cover-subtitle">Processamento de TXT · CT-e · DUIMP para análise e geração de XML fiscal</p>
+        <div class="cover-badges">
+            <span class="badge">📄 TXT</span>
+            <span class="badge">🚚 CT-e</span>
+            <span class="badge">📊 DUIMP</span>
+            <span class="badge">🔵 Sigraweb</span>
+            <span class="badge">🟠 Extrato DUIMP</span>
+            <span class="badge">⚙️ XML 8686</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── Abas principais ────────────────────────────────────────────────────
+    tab1, tab2, tab3 = st.tabs([
+        "📄  Processador TXT",
+        "🚚  Processador CT-e",
+        "📊  Sistema Integrado DUIMP"
+    ])
+
+    with tab1:
+        processador_txt()
+    with tab2:
+        processador_cte()
+    with tab3:
+        sistema_integrado_duimp()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Ocorreu um erro inesperado: {str(e)}")
+        st.code(traceback.format_exc())
     st.markdown(
         '<div class="main-header">Sistema Integrado DUIMP 2026 (Versão Final Restaurada)</div>',
         unsafe_allow_html=True
@@ -2337,38 +3218,4 @@ def sistema_integrado_duimp():
             st.warning("Realize o upload dos arquivos e a vinculação antes de gerar o XML.")
 
 
-# ==============================================================================
-# APLICAÇÃO PRINCIPAL
-# ==============================================================================
-def main():
-    load_css()
 
-    st.markdown("""
-    <div class="cover-container">
-        <img src="https://raw.githubusercontent.com/DaniloNs-creator/final/7ea6ab2a610ef8f0c11be3c34f046e7ff2cdfc6a/haefele_logo.png"
-             class="cover-logo">
-        <h1 class="cover-title">Sistema de Processamento Unificado 2026</h1>
-        <p class="cover-subtitle">Processamento de TXT, CT-e e DUIMP para análise de dados</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    tab1, tab2, tab3 = st.tabs([
-        "📄 Processador TXT",
-        "🚚 Processador CT-e",
-        "📊 Sistema Integrado DUIMP"
-    ])
-
-    with tab1:
-        processador_txt()
-    with tab2:
-        processador_cte()
-    with tab3:
-        sistema_integrado_duimp()
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        st.error(f"Ocorreu um erro inesperado: {str(e)}")
-        st.code(traceback.format_exc())
