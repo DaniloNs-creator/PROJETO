@@ -376,7 +376,7 @@ def processador_txt():
 
     with col_up:
         ph('<p class="flabel">📁 Selecione o arquivo TXT</p>')
-        arquivo = st.file_uploader("Selecione o arquivo TXT", type=['txt'], label_visibility="collapsed")
+        arquivo = st.file_uploader("Selecione o arquivo TXT", type=['txt'])
 
     with col_cfg:
         with st.expander("⚙️ Padrões adicionais de remoção"):
@@ -404,7 +404,7 @@ def processador_txt():
                     k3.metric("🗑️ Removidas",  removidas,
                               delta=f"-{removidas}", delta_color="inverse")
                     section_title("👁️ Prévia")
-                    st.text_area("Conteúdo processado", resultado, height=260, label_visibility="collapsed")
+                    st.text_area("Conteúdo processado", resultado, height=260)
                     buf = BytesIO()
                     buf.write(resultado.encode('utf-8'))
                     buf.seek(0)
@@ -595,15 +595,14 @@ def processador_cte():
     with tab_up:
         section_title("Modo de Upload")
         modo = st.radio("Modo de upload", ["☝️ Individual", "📦 Em Lote"],
-                        horizontal=True, label_visibility="collapsed")
+                        horizontal=True)
 
         if modo == "☝️ Individual":
             col_u, col_i = st.columns([3, 2], gap="large")
             with col_u:
                 ph('<p class="flabel">Arquivo XML CT-e</p>')
                 uploaded_file = st.file_uploader("Arquivo XML CT-e", type=['xml'],
-                                                 key="single_cte",
-                                                 label_visibility="collapsed")
+                                                 key="single_cte")
             with col_i:
                 ph('<div class="ipill">🔍 Busca inteligente de peso</div>')
                 with st.expander("ℹ️ Campos reconhecidos"):
@@ -631,8 +630,7 @@ def processador_cte():
             ph('<p class="flabel">Múltiplos arquivos XML CT-e</p>')
             uploaded_files = st.file_uploader("Arquivos XML CT-e", type=['xml'],
                                               accept_multiple_files=True,
-                                              key="multiple_cte",
-                                              label_visibility="collapsed")
+                                              key="multiple_cte")
             if uploaded_files:
                 ph(f'<div class="ipill">📎 {len(uploaded_files)} arquivo(s) selecionado(s)</div>')
                 if st.button("📊 Processar Todos", key="process_multiple",
@@ -1892,7 +1890,6 @@ def sistema_integrado_duimp():
                 index=0 if st.session_state["layout_app2"] == "sigraweb" else 1,
                 key="layout_radio",
                 horizontal=False,
-                label_visibility="collapsed",
             )
             novo = "sigraweb" if layout_choice.startswith("🔵") else "extrato_duimp"
             if novo != st.session_state["layout_app2"]:
@@ -1918,8 +1915,7 @@ def sistema_integrado_duimp():
                 <div class="uzone-icon">📄</div>
                 <div class="uzone-title">Passo 1 — Extrato DUIMP</div>
                 <div class="uzone-sub">Siscomex · PDF</div></div>""")
-            file_duimp = st.file_uploader("Arquivo DUIMP (PDF)", type="pdf", key="u1",
-                                          label_visibility="collapsed")
+            file_duimp = st.file_uploader("Arquivo DUIMP (PDF)", type="pdf", key="u1")
 
         with c2:
             lbl2 = "Sigraweb · Conferência Detalhada" if is_sgw else "Extrato DUIMP · Itens"
@@ -1928,8 +1924,7 @@ def sistema_integrado_duimp():
                 <div class="uzone-title">Passo 2 — {lbl2}</div>
                 <div class="uzone-sub">PDF</div></div>""")
             key2  = "Arquivo Sigraweb (PDF)" if is_sgw else "Arquivo Extrato DUIMP (PDF)"
-            file_app2 = st.file_uploader(key2, type="pdf", key="u2",
-                                         label_visibility="collapsed")
+            file_app2 = st.file_uploader(key2, type="pdf", key="u2")
 
         # ── Processar APP1 (DUIMP) ────────────────────────────────────────
         # Salva em tempfile antes de passar ao DuimpPDFParser.
