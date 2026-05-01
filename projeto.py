@@ -557,6 +557,97 @@ def load_css():
         .stTabs [data-baseweb="tab"] { padding: .35rem .6rem; font-size: .8rem; }
         .chip { font-size: .7rem; padding: .18rem .6rem; }
     }
+    /* ──────────────────────────────────────────────────────────
+       PAGE HEADER (por módulo)
+    ────────────────────────────────────────────────────────── */
+    .page-header {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 1rem 1.4rem;
+        background: var(--c-surface);
+        border: 1px solid var(--c-border);
+        border-radius: var(--radius);
+        margin-bottom: 1.2rem;
+        box-shadow: var(--shadow-xs);
+    }
+    .page-header-icon {
+        font-size: 2rem;
+        line-height: 1;
+        flex-shrink: 0;
+    }
+    .page-header-title {
+        font-size: 1.3rem;
+        font-weight: 800;
+        color: var(--c-blue);
+        line-height: 1.2;
+    }
+    .page-header-sub {
+        font-size: .82rem;
+        color: var(--c-muted);
+        margin-top: .1rem;
+    }
+
+    /* ──────────────────────────────────────────────────────────
+       UPLOAD ZONE
+    ────────────────────────────────────────────────────────── */
+    .upload-zone {
+        background: var(--c-blue-bg);
+        border: 2px dashed #93C5FD;
+        border-radius: var(--radius);
+        padding: 1rem 1.2rem;
+        text-align: center;
+        margin-bottom: .6rem;
+        transition: var(--transition);
+    }
+    .upload-zone:hover {
+        border-color: var(--c-blue-lt);
+        background: #DBEAFE;
+    }
+    .upload-zone-icon  { font-size: 1.6rem; line-height: 1; }
+    .upload-zone-title { font-weight: 700; color: var(--c-blue); font-size: .92rem; margin-top: .25rem; }
+    .upload-zone-sub   { font-size: .78rem; color: var(--c-muted); margin-top: .1rem; }
+
+    /* ──────────────────────────────────────────────────────────
+       EMPTY STATE
+    ────────────────────────────────────────────────────────── */
+    .empty-state {
+        text-align: center;
+        padding: 3rem 1rem;
+        color: var(--c-muted);
+    }
+    .empty-state-icon  { font-size: 3rem; margin-bottom: .6rem; opacity: .6; }
+    .empty-state-title { font-size: 1.05rem; font-weight: 700; color: #94A3B8; margin-bottom: .3rem; }
+    .empty-state-sub   { font-size: .85rem; color: #CBD5E1; }
+
+    /* ──────────────────────────────────────────────────────────
+       INFO PILL
+    ────────────────────────────────────────────────────────── */
+    .info-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: .4rem;
+        background: var(--c-blue-bg);
+        border: 1px solid #BFDBFE;
+        color: var(--c-blue);
+        border-radius: 20px;
+        padding: .25rem .9rem;
+        font-size: .8rem;
+        font-weight: 600;
+        margin-bottom: .6rem;
+    }
+
+    /* ──────────────────────────────────────────────────────────
+       FIELD LABEL
+    ────────────────────────────────────────────────────────── */
+    .field-label {
+        font-size: .82rem;
+        font-weight: 600;
+        color: var(--c-muted);
+        text-transform: uppercase;
+        letter-spacing: .5px;
+        margin-bottom: .25rem !important;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -564,13 +655,18 @@ def load_css():
 # PARTE 1: PROCESSADOR DE ARQUIVOS TXT
 # ==============================================================================
 def processador_txt():
-    st.title("📄 Processador de Arquivos TXT")
+    # ── Cabeçalho da página ───────────────────────────────────────────────
     st.markdown("""
-    <div class="card">
-        Remova linhas indesejadas de arquivos TXT. Carregue seu arquivo e defina os padrões a serem removidos.
+    <div class="page-header">
+        <div class="page-header-icon">📄</div>
+        <div>
+            <div class="page-header-title">Processador de Arquivos TXT</div>
+            <div class="page-header-sub">Remova linhas, substitua padrões e baixe o arquivo limpo</div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
+    # ── Lógica interna (inalterada) ───────────────────────────────────────
     def detectar_encoding(conteudo):
         resultado = chardet.detect(conteudo)
         return resultado['encoding']
@@ -602,19 +698,34 @@ def processador_txt():
             return None, 0
 
     padroes_default = ["-------", "SPED EFD-ICMS/IPI"]
-    arquivo = st.file_uploader("Selecione o arquivo TXT", type=['txt'])
 
-    with st.expander("⚙️ Configurações avançadas", expanded=False):
-        padroes_adicionais = st.text_input(
-            "Padrões adicionais para remoção (separados por vírgula)",
-            help="Exemplo: padrão1, padrão2, padrão3"
-        )
-        padroes = padroes_default + [
-            p.strip() for p in padroes_adicionais.split(",") if p.strip()
-        ] if padroes_adicionais else padroes_default
+    # ── Layout em 2 colunas: upload + config ──────────────────────────────
+    col_up, col_cfg = st.columns([3, 2], gap="large")
+
+    with col_up:
+        st.markdown('<p class="field-label">📁 Selecione o arquivo TXT</p>', unsafe_allow_html=True)
+        arquivo = st.file_uploader("", type=['txt'], label_visibility="collapsed")
+
+    with col_cfg:
+        with st.expander("⚙️ Padrões adicionais de remoção", expanded=False):
+            padroes_adicionais = st.text_input(
+                "Padrões (separados por vírgula)",
+                help="Ex: padrão1, padrão2",
+                placeholder="Ex: TOTAL, SUBTOTAL"
+            )
+            padroes = padroes_default + [
+                p.strip() for p in padroes_adicionais.split(",") if p.strip()
+            ] if padroes_adicionais else padroes_default
+
+        st.markdown(f"""
+        <div class="info-pill">
+            <span>🔍 Padrões ativos: <b>{len(padroes)}</b></span>
+        </div>
+        """, unsafe_allow_html=True)
 
     if arquivo is not None:
-        if st.button("🔄 Processar Arquivo TXT"):
+        st.markdown('<div style="height:.5rem"></div>', unsafe_allow_html=True)
+        if st.button("🔄 Processar Arquivo TXT", type="primary", use_container_width=True):
             try:
                 show_loading_animation("Analisando arquivo TXT...")
                 conteudo = arquivo.read()
@@ -623,13 +734,19 @@ def processador_txt():
                 if resultado is not None:
                     show_success_animation("Arquivo processado com sucesso!")
                     linhas_processadas = len(resultado.splitlines())
-                    st.success(f"""
-                    **Processamento concluído!** ✔️ Linhas originais: {total_linhas}
-                    ✔️ Linhas processadas: {linhas_processadas}
-                    ✔️ Linhas removidas: {total_linhas - linhas_processadas}
-                    """)
-                    st.subheader("Prévia do resultado")
-                    st.text_area("Conteúdo processado", resultado, height=300)
+                    removidas = total_linhas - linhas_processadas
+
+                    # KPIs
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("📋 Linhas Originais",   total_linhas)
+                    k2.metric("✅ Linhas Mantidas",    linhas_processadas)
+                    k3.metric("🗑️ Linhas Removidas",   removidas,
+                              delta=f"-{removidas}", delta_color="inverse")
+
+                    st.markdown('<div class="section-title">👁️ Prévia do resultado</div>',
+                                unsafe_allow_html=True)
+                    st.text_area("", resultado, height=280, label_visibility="collapsed")
+
                     buffer = BytesIO()
                     buffer.write(resultado.encode('utf-8'))
                     buffer.seek(0)
@@ -637,11 +754,20 @@ def processador_txt():
                         label="⬇️ Baixar arquivo processado",
                         data=buffer,
                         file_name=f"processado_{arquivo.name}",
-                        mime="text/plain"
+                        mime="text/plain",
+                        use_container_width=True,
                     )
             except Exception as e:
                 st.error(f"Erro inesperado: {str(e)}")
                 st.info("Tente novamente ou verifique o arquivo.")
+    else:
+        st.markdown("""
+        <div class="empty-state">
+            <div class="empty-state-icon">📂</div>
+            <div class="empty-state-title">Nenhum arquivo carregado</div>
+            <div class="empty-state-sub">Selecione um arquivo .TXT acima para começar</div>
+        </div>
+        """, unsafe_allow_html=True)
 
 # ==============================================================================
 # PARTE 2: PROCESSADOR CT-E COM EXTRAÇÃO DO PESO BRUTO E PESO BASE DE CÁLCULO
@@ -833,95 +959,124 @@ class CTeProcessorDirect:
 
 def processador_cte():
     processor = CTeProcessorDirect()
-    st.title("🚚 Processador de CT-e para Power BI")
-    st.markdown("### Processa arquivos XML de CT-e e gera planilha para análise")
 
-    with st.expander("ℹ️ Informações sobre a extração do Peso", expanded=True):
-        st.markdown("""
-        **Extração do Peso - Busca Inteligente:**
+    st.markdown("""
+    <div class="page-header">
+        <div class="page-header-icon">🚚</div>
+        <div>
+            <div class="page-header-title">Processador de CT-e</div>
+            <div class="page-header-sub">Extrai dados de XML CT-e e gera planilha para Power BI</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-        O sistema busca o peso em **múltiplos campos** na seguinte ordem de prioridade:
+    tab1, tab2, tab3 = st.tabs(["📤  Upload", "📊  Dados & Análise", "📥  Exportar"])
 
-        1. **PESO BRUTO** - Campo principal
-        2. **PESO BASE DE CALCULO** - Campo alternativo 1
-        3. **PESO BASE CÁLCULO** - Campo alternativo 2
-        4. **PESO** - Campo genérico
-        """)
-
-    tab1, tab2, tab3 = st.tabs(["📤 Upload", "👀 Visualizar Dados", "📥 Exportar"])
-
+    # ══════════════════════════════════════════════════════════════════════
     with tab1:
-        st.header("Upload de CT-es")
-        upload_option = st.radio("Selecione o tipo de upload:", ["Upload Individual", "Upload em Lote"])
-        if upload_option == "Upload Individual":
-            uploaded_file = st.file_uploader("Selecione um arquivo XML de CT-e", type=['xml'], key="single_cte")
-            if uploaded_file and st.button("📊 Processar CT-e", key="process_single"):
-                show_loading_animation("Analisando estrutura do XML...")
-                show_processing_animation("Extraindo dados do CT-e...")
-                success, message = processor.process_single_file(uploaded_file)
-                if success:
-                    show_success_animation("CT-e processado com sucesso!")
+        st.markdown('<div class="section-title">Modo de Upload</div>', unsafe_allow_html=True)
+        upload_option = st.radio(
+            "", ["☝️ Upload Individual", "📦 Upload em Lote"],
+            horizontal=True, label_visibility="collapsed"
+        )
+
+        if upload_option == "☝️ Upload Individual":
+            col_up, col_info = st.columns([3, 2], gap="large")
+            with col_up:
+                st.markdown('<p class="field-label">Arquivo XML CT-e</p>', unsafe_allow_html=True)
+                uploaded_file = st.file_uploader(
+                    "", type=['xml'], key="single_cte", label_visibility="collapsed"
+                )
+            with col_info:
+                st.markdown("""
+                <div class="info-pill">🔍 Busca inteligente de peso em múltiplos campos</div>
+                """, unsafe_allow_html=True)
+                with st.expander("ℹ️ Campos de peso reconhecidos"):
+                    st.markdown("""
+                    1. **PESO BRUTO** — campo principal
+                    2. **PESO BASE DE CALCULO** — alternativo 1
+                    3. **PESO BASE CÁLCULO** — alternativo 2
+                    4. **PESO** — genérico
+                    """)
+
+            if uploaded_file:
+                if st.button("📊 Processar CT-e", key="process_single", type="primary",
+                             use_container_width=True):
+                    show_loading_animation("Analisando estrutura do XML...")
+                    show_processing_animation("Extraindo dados do CT-e...")
+                    success, message = processor.process_single_file(uploaded_file)
+                    if success:
+                        show_success_animation("CT-e processado com sucesso!")
+                        df = processor.get_dataframe()
+                        if not df.empty:
+                            ultimo = df.iloc[-1]
+                            r1, r2 = st.columns(2)
+                            r1.metric("⚖️ Peso encontrado", f"{ultimo['Peso Bruto (kg)']} kg")
+                            r2.metric("🏷️ Tipo de peso", ultimo['Tipo de Peso Encontrado'])
+                    else:
+                        st.error(message)
+        else:
+            st.markdown('<p class="field-label">Múltiplos arquivos XML CT-e</p>',
+                        unsafe_allow_html=True)
+            uploaded_files = st.file_uploader(
+                "", type=['xml'], accept_multiple_files=True,
+                key="multiple_cte", label_visibility="collapsed"
+            )
+            if uploaded_files:
+                st.markdown(f'<div class="info-pill">📎 {len(uploaded_files)} arquivo(s) selecionado(s)</div>',
+                            unsafe_allow_html=True)
+                if st.button("📊 Processar Todos", key="process_multiple", type="primary",
+                             use_container_width=True):
+                    show_loading_animation(f"Processando {len(uploaded_files)} arquivos...")
+                    results = processor.process_multiple_files(uploaded_files)
+                    show_success_animation("Lote concluído!")
+
+                    r1, r2 = st.columns(2)
+                    r1.metric("✅ Sucesso", results['success'])
+                    r2.metric("❌ Erros",   results['errors'])
+
                     df = processor.get_dataframe()
                     if not df.empty:
-                        ultimo_cte = df.iloc[-1]
-                        st.info(f"""
-                        **Extração bem-sucedida:**
-                        - **Peso encontrado:** {ultimo_cte['Peso Bruto (kg)']} kg
-                        - **Tipo de peso:** {ultimo_cte['Tipo de Peso Encontrado']}
-                        """)
-                else:
-                    st.error(message)
-        else:
-            uploaded_files = st.file_uploader(
-                "Selecione múltiplos arquivos XML de CT-e",
-                type=['xml'], accept_multiple_files=True, key="multiple_cte"
-            )
-            if uploaded_files and st.button("📊 Processar Todos", key="process_multiple"):
-                show_loading_animation(f"Iniciando processamento de {len(uploaded_files)} arquivos...")
-                results = processor.process_multiple_files(uploaded_files)
-                show_success_animation("Processamento em lote concluído!")
-                st.success(f"""
-                **Processamento concluído!** ✅ Sucessos: {results['success']}
-                ❌ Erros: {results['errors']}
-                """)
-                df = processor.get_dataframe()
-                if not df.empty:
-                    tipos_peso = df['Tipo de Peso Encontrado'].value_counts()
-                    peso_total = df['Peso Bruto (kg)'].sum()
-                    st.info(f"""
-                    **Estatísticas de extração:**
-                    - Peso bruto total: {peso_total:,.2f} kg
-                    - Peso médio por CT-e: {df['Peso Bruto (kg)'].mean():,.2f} kg
-                    """)
-                    for tipo, quantidade in tipos_peso.items():
-                        st.write(f"  - **{tipo}**: {quantidade} CT-e(s)")
-                if results['errors'] > 0:
-                    with st.expander("Ver mensagens detalhadas"):
-                        for msg in results['messages']:
-                            st.write(f"- {msg}")
+                        k1, k2, k3 = st.columns(3)
+                        k1.metric("⚖️ Peso Total",  f"{df['Peso Bruto (kg)'].sum():,.2f} kg")
+                        k2.metric("📈 Peso Médio",  f"{df['Peso Bruto (kg)'].mean():,.2f} kg")
+                        k3.metric("🏷️ Tipos",       df['Tipo de Peso Encontrado'].nunique())
 
-        if st.button("🗑️ Limpar Dados Processados", type="secondary"):
+                    if results['errors'] > 0:
+                        with st.expander("⚠️ Ver erros detalhados"):
+                            for msg in results['messages']:
+                                if "Erro" in msg:
+                                    st.warning(msg)
+
+        st.divider()
+        if st.button("🗑️ Limpar Dados Processados", type="secondary", use_container_width=True):
             processor.clear_data()
-            st.success("Dados limpos com sucesso!")
-            time.sleep(1)
+            st.success("Dados limpos.")
+            time.sleep(0.8)
             st.rerun()
 
+    # ══════════════════════════════════════════════════════════════════════
     with tab2:
-        st.header("Dados Processados")
         df = processor.get_dataframe()
         if not df.empty:
-            st.write(f"Total de CT-es processados: {len(df)}")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                uf_filter = st.multiselect("Filtrar por UF Início", options=df['UF Início'].unique())
-            with col2:
-                uf_destino_filter = st.multiselect("Filtrar por UF Destino", options=df['UF Destino'].unique())
-            with col3:
-                tipo_peso_filter = st.multiselect("Filtrar por Tipo de Peso", options=df['Tipo de Peso Encontrado'].unique())
-            st.subheader("Filtro por Peso Bruto")
+            # ── Filtros ──────────────────────────────────────────────────
+            st.markdown('<div class="section-title">🔎 Filtros</div>', unsafe_allow_html=True)
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                uf_filter = st.multiselect("UF Início", options=df['UF Início'].unique())
+            with fc2:
+                uf_destino_filter = st.multiselect("UF Destino", options=df['UF Destino'].unique())
+            with fc3:
+                tipo_peso_filter = st.multiselect("Tipo de Peso", options=df['Tipo de Peso Encontrado'].unique())
+
             peso_min = float(df['Peso Bruto (kg)'].min())
             peso_max = float(df['Peso Bruto (kg)'].max())
-            peso_filter = st.slider("Selecione a faixa de peso (kg)", peso_min, peso_max, (peso_min, peso_max))
+            if peso_min < peso_max:
+                peso_filter = st.slider("Faixa de Peso (kg)", peso_min, peso_max,
+                                        (peso_min, peso_max), format="%.1f kg")
+            else:
+                peso_filter = (peso_min, peso_max)
+
             filtered_df = df.copy()
             if uf_filter:
                 filtered_df = filtered_df[filtered_df['UF Início'].isin(uf_filter)]
@@ -933,94 +1088,120 @@ def processador_cte():
                 (filtered_df['Peso Bruto (kg)'] >= peso_filter[0]) &
                 (filtered_df['Peso Bruto (kg)'] <= peso_filter[1])
             ]
+
+            # ── KPIs ─────────────────────────────────────────────────────
+            st.markdown('<div class="section-title">📊 Métricas</div>', unsafe_allow_html=True)
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("💰 Valor Total",    f"R$ {filtered_df['Valor Prestação'].sum():,.2f}")
+            m2.metric("⚖️ Peso Total",     f"{filtered_df['Peso Bruto (kg)'].sum():,.2f} kg")
+            m3.metric("📈 Peso Médio/CT-e",f"{filtered_df['Peso Bruto (kg)'].mean():,.2f} kg")
+            m4.metric("📋 CT-es",          len(filtered_df))
+
+            # ── Tabela ───────────────────────────────────────────────────
+            st.markdown('<div class="section-title">📋 Dados</div>', unsafe_allow_html=True)
             colunas_principais = [
-                'Arquivo', 'nCT', 'Data Emissão', 'Emitente', 'Remetente',
-                'Destinatário', 'UF Início', 'UF Destino', 'Peso Bruto (kg)',
-                'Tipo de Peso Encontrado', 'Valor Prestação'
+                'Arquivo','nCT','Data Emissão','Emitente','Remetente',
+                'Destinatário','UF Início','UF Destino','Peso Bruto (kg)',
+                'Tipo de Peso Encontrado','Valor Prestação'
             ]
-            st.dataframe(filtered_df[colunas_principais], use_container_width=True)
-            with st.expander("📋 Ver todos os campos detalhados"):
+            st.dataframe(filtered_df[colunas_principais], use_container_width=True, height=320)
+            with st.expander("📋 Todos os campos"):
                 st.dataframe(filtered_df, use_container_width=True)
-            st.subheader("📈 Estatísticas")
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("Total Valor Prestação", f"R$ {filtered_df['Valor Prestação'].sum():,.2f}")
-            col2.metric("Peso Bruto Total", f"{filtered_df['Peso Bruto (kg)'].sum():,.2f} kg")
-            col3.metric("Média Peso/CT-e", f"{filtered_df['Peso Bruto (kg)'].mean():,.2f} kg")
-            col4.metric("Tipos de Peso", f"{filtered_df['Tipo de Peso Encontrado'].nunique()}")
-            col_chart1, col_chart2 = st.columns(2)
-            with col_chart1:
-                st.subheader("📊 Distribuição por Tipo de Peso")
+
+            # ── Gráficos ─────────────────────────────────────────────────
+            st.markdown('<div class="section-title">📈 Análise Visual</div>', unsafe_allow_html=True)
+            g1, g2 = st.columns(2)
+            with g1:
                 if not filtered_df.empty:
                     tipo_counts = filtered_df['Tipo de Peso Encontrado'].value_counts()
-                    fig_tipo = px.pie(
+                    fig_pie = px.pie(
                         values=tipo_counts.values, names=tipo_counts.index,
-                        title="Distribuição por Tipo de Peso Encontrado"
+                        title="Distribuição por Tipo de Peso",
+                        color_discrete_sequence=px.colors.sequential.Blues_r,
+                        hole=0.4
                     )
-                    st.plotly_chart(fig_tipo, use_container_width=True)
-            with col_chart2:
-                st.subheader("📈 Relação Peso x Valor")
+                    fig_pie.update_layout(margin=dict(t=40,b=10,l=10,r=10),
+                                          legend=dict(orientation="h",y=-0.15))
+                    st.plotly_chart(fig_pie, use_container_width=True)
+            with g2:
                 if not filtered_df.empty:
-                    fig_relacao = px.scatter(
+                    fig_sc = px.scatter(
                         filtered_df, x='Peso Bruto (kg)', y='Valor Prestação',
-                        title="Relação entre Peso Bruto e Valor da Prestação",
-                        color='Tipo de Peso Encontrado'
+                        title="Peso vs Valor Prestação",
+                        color='Tipo de Peso Encontrado',
+                        size_max=12,
+                        color_discrete_sequence=px.colors.qualitative.Set2
                     )
                     try:
                         x = filtered_df['Peso Bruto (kg)'].values
                         y = filtered_df['Valor Prestação'].values
                         mask = ~np.isnan(x) & ~np.isnan(y)
-                        x_clean = x[mask]
-                        y_clean = y[mask]
-                        if len(x_clean) > 1:
-                            coefficients = np.polyfit(x_clean, y_clean, 1)
-                            polynomial = np.poly1d(coefficients)
-                            x_trend = np.linspace(x_clean.min(), x_clean.max(), 100)
-                            y_trend = polynomial(x_trend)
-                            fig_relacao.add_trace(go.Scatter(
-                                x=x_trend, y=y_trend, mode='lines',
-                                name='Linha de Tendência',
-                                line=dict(color='red', dash='dash'), opacity=0.7
+                        x_c, y_c = x[mask], y[mask]
+                        if len(x_c) > 1:
+                            poly = np.poly1d(np.polyfit(x_c, y_c, 1))
+                            xs = np.linspace(x_c.min(), x_c.max(), 100)
+                            fig_sc.add_trace(go.Scatter(
+                                x=xs, y=poly(xs), mode='lines',
+                                name='Tendência', line=dict(color='#EF4444',dash='dash'), opacity=.7
                             ))
                     except Exception:
                         pass
-                    st.plotly_chart(fig_relacao, use_container_width=True)
+                    fig_sc.update_layout(margin=dict(t=40,b=10,l=10,r=10),
+                                         legend=dict(orientation="h",y=-0.2))
+                    st.plotly_chart(fig_sc, use_container_width=True)
         else:
-            st.info("Nenhum CT-e processado ainda. Faça upload de arquivos na aba 'Upload'.")
+            st.markdown("""
+            <div class="empty-state">
+                <div class="empty-state-icon">🚚</div>
+                <div class="empty-state-title">Nenhum CT-e processado</div>
+                <div class="empty-state-sub">Vá para a aba Upload e carregue os arquivos XML</div>
+            </div>
+            """, unsafe_allow_html=True)
 
+    # ══════════════════════════════════════════════════════════════════════
     with tab3:
-        st.header("Exportar para Excel")
         df = processor.get_dataframe()
         if not df.empty:
-            st.success(f"Pronto para exportar {len(df)} registros")
-            export_option = st.radio("Formato de exportação:", ["Excel (.xlsx)", "CSV (.csv)"])
-            st.subheader("Selecionar Colunas para Exportação")
-            todas_colunas = df.columns.tolist()
-            colunas_selecionadas = st.multiselect(
-                "Selecione as colunas para exportar:", options=todas_colunas, default=todas_colunas
-            )
+            st.markdown('<div class="section-title">💾 Exportar Dados</div>', unsafe_allow_html=True)
+            col_fmt, col_cols = st.columns([1, 2], gap="large")
+            with col_fmt:
+                st.metric("📋 Registros disponíveis", len(df))
+                export_option = st.radio("Formato", ["📊 Excel (.xlsx)", "📄 CSV (.csv)"])
+            with col_cols:
+                todas_colunas = df.columns.tolist()
+                colunas_selecionadas = st.multiselect(
+                    "Colunas para exportar", options=todas_colunas, default=todas_colunas
+                )
+
             df_export = df[colunas_selecionadas] if colunas_selecionadas else df
-            if export_option == "Excel (.xlsx)":
-                show_processing_animation("Gerando arquivo Excel...")
+
+            st.divider()
+            if "Excel" in export_option:
                 output = BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_export.to_excel(writer, sheet_name='Dados_CTe', index=False)
                 output.seek(0)
                 st.download_button(
-                    label="📥 Baixar Planilha Excel", data=output,
-                    file_name="dados_cte.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    "📥 Baixar Excel", data=output, file_name="dados_cte.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
             else:
-                show_processing_animation("Gerando arquivo CSV...")
                 csv = df_export.to_csv(index=False).encode('utf-8')
                 st.download_button(
-                    label="📥 Baixar Arquivo CSV", data=csv,
-                    file_name="dados_cte.csv", mime="text/csv"
+                    "📥 Baixar CSV", data=csv, file_name="dados_cte.csv",
+                    mime="text/csv", use_container_width=True
                 )
-            with st.expander("📋 Prévia dos dados a serem exportados"):
-                st.dataframe(df_export.head(10))
+            with st.expander("👁️ Prévia (10 primeiras linhas)"):
+                st.dataframe(df_export.head(10), use_container_width=True)
         else:
-            st.warning("Nenhum dado disponível para exportação.")
+            st.markdown("""
+            <div class="empty-state">
+                <div class="empty-state-icon">📥</div>
+                <div class="empty-state-title">Nenhum dado para exportar</div>
+                <div class="empty-state-sub">Processe CT-es na aba Upload primeiro</div>
+            </div>
+            """, unsafe_allow_html=True)
 
 
 # ==============================================================================
@@ -2366,16 +2547,498 @@ def _render_totais_grade(df: pd.DataFrame):
 
 
 def sistema_integrado_duimp():
-    st.markdown(
-        '<div class="main-header">📊 Sistema Integrado DUIMP 2026</div>',
-        unsafe_allow_html=True
-    )
+    st.markdown("""
+    <div class="page-header">
+        <div class="page-header-icon">📊</div>
+        <div>
+            <div class="page-header-title">Sistema Integrado DUIMP 2026</div>
+            <div class="page-header-sub">Upload · Vinculação · Conferência · Geração de XML 8686</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
     tab1, tab2, tab3 = st.tabs([
-        "📂 Upload e Vinculação",
-        "📋 Conferência Detalhada",
-        "💾 Exportar XML"
+        "📂  Upload & Vinculação",
+        "📋  Conferência",
+        "💾  Exportar XML"
     ])
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 1 — UPLOAD E VINCULAÇÃO
+    # ══════════════════════════════════════════════════════════════════════
+    with tab1:
+
+        # ── Seletor de layout ─────────────────────────────────────────────
+        st.markdown('<div class="section-title">⚙️ Formato do Arquivo de Tributos (APP2)</div>',
+                    unsafe_allow_html=True)
+
+        col_radio, col_badge = st.columns([3, 1], gap="large")
+        with col_radio:
+            layout_choice = st.radio(
+                "",
+                options=[
+                    "🔵  Sigraweb — Conferência do Processo Detalhado (layout novo)",
+                    "🟠  Extrato DUIMP — Itens da DUIMP (layout antigo)"
+                ],
+                index=0 if st.session_state["layout_app2"] == "sigraweb" else 1,
+                key="layout_radio",
+                horizontal=False,
+                label_visibility="collapsed"
+            )
+            novo_layout = "sigraweb" if layout_choice.startswith("🔵") else "extrato_duimp"
+            if novo_layout != st.session_state["layout_app2"]:
+                st.session_state["layout_app2"]     = novo_layout
+                st.session_state["parsed_sigraweb"] = None
+                st.session_state["merged_df"]       = None
+                st.rerun()
+
+        with col_badge:
+            is_sgw = st.session_state["layout_app2"] == "sigraweb"
+            badge_cls  = "layout-badge"        if is_sgw else "layout-badge amber"
+            badge_text = "🔵 Sigraweb (ativo)" if is_sgw else "🟠 Extrato DUIMP (ativo)"
+            st.markdown(f'<div class="{badge_cls}">{badge_text}</div>', unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Upload dos dois arquivos ──────────────────────────────────────
+        st.markdown('<div class="section-title">📂 Carregar Arquivos</div>', unsafe_allow_html=True)
+        col1, col2 = st.columns(2, gap="large")
+
+        with col1:
+            st.markdown("""
+            <div class="upload-zone">
+                <div class="upload-zone-icon">📄</div>
+                <div class="upload-zone-title">Passo 1 — Extrato DUIMP</div>
+                <div class="upload-zone-sub">Siscomex · PDF</div>
+            </div>
+            """, unsafe_allow_html=True)
+            file_duimp = st.file_uploader("DUIMP PDF", type="pdf", key="u1",
+                                          label_visibility="collapsed")
+
+        with col2:
+            label_zone = ("Sigraweb · Conferência Detalhada"
+                          if st.session_state["layout_app2"] == "sigraweb"
+                          else "Extrato DUIMP · Itens da DUIMP")
+            label_u2 = ("Arquivo Sigraweb (.pdf)"
+                        if st.session_state["layout_app2"] == "sigraweb"
+                        else "Arquivo Extrato DUIMP (.pdf)")
+            st.markdown(f"""
+            <div class="upload-zone">
+                <div class="upload-zone-icon">📑</div>
+                <div class="upload-zone-title">Passo 2 — {label_zone}</div>
+                <div class="upload-zone-sub">PDF</div>
+            </div>
+            """, unsafe_allow_html=True)
+            file_app2 = st.file_uploader(label_u2, type="pdf", key="u2",
+                                         label_visibility="collapsed")
+
+        # ── Processamento APP1 ────────────────────────────────────────────
+        if file_duimp:
+            if (st.session_state["parsed_duimp"] is None or
+                    file_duimp.name != getattr(st.session_state.get("last_duimp"), "name", "")):
+                try:
+                    p = DuimpPDFParser(file_duimp.read())
+                    p.preprocess()
+                    p.extract_header()
+                    p.extract_items()
+                    st.session_state["parsed_duimp"] = p
+                    st.session_state["last_duimp"]   = file_duimp
+                    df = pd.DataFrame(p.items)
+                    cols_fiscais = [
+                        "NUMBER", "Frete (R$)", "Seguro (R$)",
+                        "II (R$)", "II Base (R$)", "II Alíq. (%)",
+                        "IPI (R$)", "IPI Base (R$)", "IPI Alíq. (%)",
+                        "PIS (R$)", "PIS Base (R$)", "PIS Alíq. (%)",
+                        "COFINS (R$)", "COFINS Base (R$)", "COFINS Alíq. (%)",
+                        "Aduaneiro (R$)"
+                    ]
+                    for col in cols_fiscais:
+                        df[col] = 0.00 if col != "NUMBER" else ""
+                    st.session_state["merged_df"] = df
+                    st.markdown(
+                        f'<div class="success-box">✅ DUIMP lida — {len(p.items)} adições encontradas.</div>',
+                        unsafe_allow_html=True
+                    )
+                except Exception as e:
+                    st.error(f"Erro ao ler DUIMP: {e}")
+
+        # ── Processamento APP2 ────────────────────────────────────────────
+        if file_app2 and st.session_state["parsed_sigraweb"] is None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                tmp.write(file_app2.getvalue())
+                tmp_path = tmp.name
+            try:
+                parser_app2 = (SigrawebPDFParser()
+                               if st.session_state["layout_app2"] == "sigraweb"
+                               else HafelePDFParser())
+                doc_app2 = parser_app2.parse_pdf(tmp_path)
+                st.session_state["parsed_sigraweb"] = doc_app2
+                qtd_itens = len(doc_app2['itens'])
+                if qtd_itens > 0:
+                    layout_name = ("Sigraweb" if st.session_state["layout_app2"] == "sigraweb"
+                                   else "Extrato DUIMP")
+                    st.markdown(
+                        f'<div class="success-box">✅ {layout_name} lido — {qtd_itens} itens encontrados.</div>',
+                        unsafe_allow_html=True
+                    )
+                    # Resumo Sigraweb
+                    if st.session_state["layout_app2"] == "sigraweb":
+                        cab = doc_app2.get('cabecalho', {})
+                        tot = doc_app2.get('totais', {})
+                        with st.expander("📋 Resumo do Processo (Sigraweb)", expanded=True):
+                            r1, r2, r3, r4 = st.columns(4)
+                            r1.metric("Número DI",        cab.get('numeroDI','N/A'))
+                            r2.metric("Adições",          qtd_itens)
+                            r3.metric("Peso Bruto (kg)",  cab.get('pesoBruto','N/A'))
+                            r4.metric("Via Transporte",   cab.get('viaTransporte','N/A'))
+                            m1,m2,m3,m4 = st.columns(4)
+                            m1.metric("II Total",         f"R$ {tot.get('total_ii',0):,.2f}")
+                            m2.metric("IPI Total",        f"R$ {tot.get('total_ipi',0):,.2f}")
+                            m3.metric("PIS Total",        f"R$ {tot.get('total_pis',0):,.2f}")
+                            m4.metric("COFINS Total",     f"R$ {tot.get('total_cofins',0):,.2f}")
+                            n1,n2,n3,n4 = st.columns(4)
+                            n1.metric("Vlr Aduaneiro",    f"R$ {tot.get('total_valor_aduaneiro',0):,.2f}")
+                            n2.metric("Frete Total",      f"R$ {tot.get('total_frete',0):,.2f}")
+                            n3.metric("Seguro Total",     f"R$ {tot.get('total_seguro',0):,.2f}")
+                            n4.metric("Peso Líq. (kg)",   f"{tot.get('peso_liquido_total',0):,.2f}")
+                    else:
+                        tot = doc_app2.get('totais',{})
+                        with st.expander("📋 Resumo Extrato DUIMP", expanded=True):
+                            e1,e2,e3,e4 = st.columns(4)
+                            e1.metric("Itens",      qtd_itens)
+                            e2.metric("II Total",   f"R$ {tot.get('total_ii',0):,.2f}")
+                            e3.metric("PIS Total",  f"R$ {tot.get('total_pis',0):,.2f}")
+                            e4.metric("COFINS Total",f"R$ {tot.get('total_cofins',0):,.2f}")
+                else:
+                    st.warning("Nenhum item detectado. Verifique se o layout selecionado está correto.")
+            except Exception as e:
+                st.error(f"Erro ao ler APP2: {e}")
+                st.code(traceback.format_exc())
+            finally:
+                if os.path.exists(tmp_path):
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
+
+        # ── Ações ─────────────────────────────────────────────────────────
+        st.divider()
+        st.markdown('<div class="section-title">🔗 Ações</div>', unsafe_allow_html=True)
+
+        btn_col, reset_col = st.columns([2, 1], gap="large")
+        with btn_col:
+            if st.button("🔗 VINCULAR DADOS (Cruzamento Automático)",
+                         type="primary", use_container_width=True):
+                if st.session_state["merged_df"] is not None and \
+                   st.session_state["parsed_sigraweb"] is not None:
+                    try:
+                        doc_app2 = st.session_state["parsed_sigraweb"]
+                        df_dest  = st.session_state["merged_df"].copy()
+                        df_dest, count, not_found = _merge_app2_items(df_dest, doc_app2['itens'])
+                        st.session_state["merged_df"] = df_dest
+                        st.success(f"✅ **{count}** adições vinculadas com sucesso.")
+                        if not_found:
+                            st.warning(f"⚠️ {len(not_found)} adição(ões) não encontradas: {not_found}")
+                        with st.expander("📊 Resumo da Vinculação"):
+                            _render_totais_grade(df_dest)
+                    except Exception as e:
+                        st.error(f"Erro na vinculação: {e}")
+                        st.code(traceback.format_exc())
+                else:
+                    st.warning("Carregue os dois arquivos antes de vincular.")
+
+        with reset_col:
+            st.markdown('<div style="height:.1rem"></div>', unsafe_allow_html=True)
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                if st.button("🔄 DUIMP", type="secondary", use_container_width=True):
+                    st.session_state["parsed_duimp"] = None
+                    st.session_state["merged_df"]    = None
+                    st.rerun()
+            with rc2:
+                if st.button("🔄 APP2",  type="secondary", use_container_width=True):
+                    st.session_state["parsed_sigraweb"] = None
+                    st.rerun()
+            if st.button("🗑️ Limpar Tudo", type="secondary", use_container_width=True):
+                for k in ["parsed_duimp","parsed_sigraweb","merged_df","last_duimp"]:
+                    st.session_state[k] = None
+                st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 2 — CONFERÊNCIA
+    # ══════════════════════════════════════════════════════════════════════
+    with tab2:
+        st.markdown('<div class="section-title">📋 Conferência e Edição</div>',
+                    unsafe_allow_html=True)
+
+        doc_app2 = st.session_state.get("parsed_sigraweb")
+        if doc_app2:
+            itens_app2 = doc_app2.get('itens', [])
+
+            # Cabeçalho Sigraweb
+            if st.session_state["layout_app2"] == "sigraweb":
+                cab = doc_app2.get('cabecalho', {})
+                with st.expander("📄 Dados do Processo — Sigraweb", expanded=False):
+                    dados_cab = {
+                        "Campo": ["Número DI","SIGRAWEB ID","Empresa","CNPJ","URF Entrada",
+                                  "Via Transporte","País Procedência","Incoterms",
+                                  "IDT Conhecimento","IDT Master","Data Embarque",
+                                  "Data Chegada","Data Registro","Peso Bruto (kg)",
+                                  "Peso Líquido (kg)","Volumes","Embalagem",
+                                  "Banco","Agência","Taxa EUR","Taxa USD",
+                                  "FOB EUR","FOB BRL","Frete USD","Frete BRL",
+                                  "Seguro USD","Seguro BRL","CIF USD","CIF BRL",
+                                  "Vlr Aduaneiro USD","Vlr Aduaneiro BRL"],
+                        "Valor": [
+                            cab.get('numeroDI',''), cab.get('sigraweb',''),
+                            cab.get('nomeImportador',''), cab.get('cnpj',''),
+                            cab.get('urf',''), cab.get('viaTransporte',''),
+                            cab.get('paisProcedencia',''), cab.get('incoterms',''),
+                            cab.get('idtConhecimento',''), cab.get('idtMaster',''),
+                            cab.get('dataEmbarque',''), cab.get('dataChegada',''),
+                            cab.get('dataRegistro',''), cab.get('pesoBruto',''),
+                            cab.get('pesoLiquido',''), cab.get('volumes',''),
+                            cab.get('embalagem',''), cab.get('banco',''),
+                            cab.get('agencia',''), cab.get('taxaEUR',''),
+                            cab.get('taxaDolar',''), cab.get('fobEUR',''),
+                            cab.get('fobBRL',''), cab.get('freteUSD',''),
+                            cab.get('freteBRL',''), cab.get('seguroUSD',''),
+                            cab.get('seguroBRL',''), cab.get('cifUSD',''),
+                            cab.get('cifBRL',''), cab.get('valorAduaneiroUSD',''),
+                            cab.get('valorAduaneiroBRL',''),
+                        ]
+                    }
+                    st.dataframe(pd.DataFrame(dados_cab), use_container_width=True, hide_index=True)
+
+            # Tabela de adições APP2
+            layout_label = "Sigraweb" if st.session_state["layout_app2"]=="sigraweb" else "Extrato DUIMP"
+            with st.expander(f"📑 Adições Extraídas — {layout_label}", expanded=False):
+                if itens_app2:
+                    df_app2_view = pd.DataFrame([{
+                        'Adição':        it.get('numeroAdicao',''),
+                        'Part Number':   it.get('codigo_interno',''),
+                        'NCM':           it.get('ncm',''),
+                        'Descrição':     str(it.get('descricao', it.get('nome_produto','')))[:60],
+                        'País':          it.get('paisOrigem',''),
+                        'Qtd Est.':      it.get('quantidade',0),
+                        'Qtd Com.':      it.get('quantidade_comercial',0),
+                        'Und':           it.get('unidade',''),
+                        'Peso Líq.':     it.get('pesoLiq', it.get('peso_liquido',0)),
+                        'Vlr Adu. BRL':  it.get('aduaneiro_reais', it.get('valorAduaneiroReal', it.get('local_aduaneiro',0))),
+                        'Frete BRL':     it.get('frete_internacional',0),
+                        'Seguro BRL':    it.get('seguro_internacional',0),
+                        'II %':          it.get('ii_aliquota',0),
+                        'II Base R$':    it.get('ii_base_calculo',0),
+                        'II R$':         it.get('ii_valor_devido',0),
+                        'IPI %':         it.get('ipi_aliquota',0),
+                        'IPI R$':        it.get('ipi_valor_devido',0),
+                        'PIS %':         it.get('pis_aliquota',0),
+                        'PIS R$':        it.get('pis_valor_devido',0),
+                        'COFINS %':      it.get('cofins_aliquota',0),
+                        'COFINS R$':     it.get('cofins_valor_devido',0),
+                        'Total Imp.':    it.get('total_impostos',0),
+                    } for it in itens_app2])
+                    st.dataframe(df_app2_view, use_container_width=True, height=360)
+                    tt1,tt2,tt3,tt4,tt5 = st.columns(5)
+                    tt1.metric("Vlr Adu. Total",f"R$ {df_app2_view['Vlr Adu. BRL'].sum():,.2f}")
+                    tt2.metric("II Total",      f"R$ {df_app2_view['II R$'].sum():,.2f}")
+                    tt3.metric("IPI Total",     f"R$ {df_app2_view['IPI R$'].sum():,.2f}")
+                    tt4.metric("PIS Total",     f"R$ {df_app2_view['PIS R$'].sum():,.2f}")
+                    tt5.metric("COFINS Total",  f"R$ {df_app2_view['COFINS R$'].sum():,.2f}")
+                else:
+                    st.info("Nenhum item extraído.")
+
+        # Grade editável principal
+        if st.session_state["merged_df"] is not None:
+            st.markdown('<div class="section-title">✏️ Grade de Edição — DUIMP + APP2</div>',
+                        unsafe_allow_html=True)
+            col_config = {
+                "numeroAdicao": st.column_config.TextColumn("Item",      width="small",  disabled=True),
+                "NUMBER":       st.column_config.TextColumn("Part Number",width="medium"),
+                "ncm":          st.column_config.TextColumn("NCM",       width="small",  disabled=True),
+                "descricao":    st.column_config.TextColumn("Descrição", width="large",  disabled=True),
+                "quantidade":   st.column_config.TextColumn("Qtd Est.",  disabled=True),
+                "quantidade_comercial": st.column_config.TextColumn("Qtd Com.", disabled=True),
+                "unidade":      st.column_config.TextColumn("Unidade",   disabled=True),
+                "pesoLiq":      st.column_config.TextColumn("Peso Líq.", disabled=True),
+                "valorTotal":   st.column_config.TextColumn("FOB",       disabled=True),
+                "Frete (R$)":   st.column_config.NumberColumn(format="R$ %.2f"),
+                "Seguro (R$)":  st.column_config.NumberColumn(format="R$ %.2f"),
+                "Aduaneiro (R$)":st.column_config.NumberColumn("Vlr Adu.",format="R$ %.2f"),
+                "II Base (R$)": st.column_config.NumberColumn("II Base",  format="R$ %.2f"),
+                "II Alíq. (%)": st.column_config.NumberColumn("II %",    format="%.4f"),
+                "II (R$)":      st.column_config.NumberColumn("II R$",   format="R$ %.2f"),
+                "IPI Base (R$)":st.column_config.NumberColumn("IPI Base", format="R$ %.2f"),
+                "IPI Alíq. (%)":st.column_config.NumberColumn("IPI %",   format="%.4f"),
+                "IPI (R$)":     st.column_config.NumberColumn("IPI R$",  format="R$ %.2f"),
+                "PIS Base (R$)":st.column_config.NumberColumn("PIS Base", format="R$ %.2f"),
+                "PIS Alíq. (%)":st.column_config.NumberColumn("PIS %",   format="%.4f"),
+                "PIS (R$)":     st.column_config.NumberColumn("PIS R$",  format="R$ %.2f"),
+                "COFINS Base (R$)":st.column_config.NumberColumn("COF Base",format="R$ %.2f"),
+                "COFINS Alíq. (%)":st.column_config.NumberColumn("COF %", format="%.4f"),
+                "COFINS (R$)":  st.column_config.NumberColumn("COF R$",  format="R$ %.2f"),
+            }
+            edited_df = st.data_editor(
+                st.session_state["merged_df"],
+                hide_index=True, column_config=col_config,
+                use_container_width=True, height=560
+            )
+            for tax in ['II','IPI','PIS','COFINS']:
+                bc = f"{tax} Base (R$)"; ac = f"{tax} Alíq. (%)"; vc = f"{tax} (R$)"
+                if bc in edited_df.columns and ac in edited_df.columns:
+                    edited_df[bc] = pd.to_numeric(edited_df[bc], errors='coerce').fillna(0.0)
+                    edited_df[ac] = pd.to_numeric(edited_df[ac], errors='coerce').fillna(0.0)
+                    edited_df[vc] = edited_df[bc] * (edited_df[ac] / 100.0)
+            st.session_state["merged_df"] = edited_df
+            st.markdown('<div class="section-title">📊 Totais da Grade</div>',
+                        unsafe_allow_html=True)
+            _render_totais_grade(edited_df)
+        else:
+            st.markdown("""
+            <div class="empty-state">
+                <div class="empty-state-icon">📋</div>
+                <div class="empty-state-title">Nenhum dado vinculado ainda</div>
+                <div class="empty-state-sub">Carregue os arquivos e execute a vinculação na aba Upload</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 3 — EXPORTAR XML
+    # ══════════════════════════════════════════════════════════════════════
+    with tab3:
+        st.markdown('<div class="section-title">⚙️ Configurações do XML Final (Layout 8686)</div>',
+                    unsafe_allow_html=True)
+
+        cab_sgw = {}
+        if (st.session_state.get("parsed_sigraweb") and
+                st.session_state["layout_app2"] == "sigraweb"):
+            cab_sgw = st.session_state["parsed_sigraweb"].get("cabecalho", {})
+
+        with st.expander("📅 Datas, Pesos e Locais", expanded=True):
+            xc1, xc2, xc3 = st.columns(3, gap="large")
+            with xc1:
+                st.markdown("**Quantidade & Datas**")
+                _vol = cab_sgw.get('volumes', '')
+                inp_qtd_volume = st.text_input("Qtd. Volume",        value=str(_vol).zfill(5) if _vol else '00001')
+                inp_dt_chegada = st.text_input("Data Chegada",       value=cab_sgw.get('dataChegadaISO','20251120') or '20251120')
+                inp_dt_desemb  = st.text_input("Data Desembaraço",   value=cab_sgw.get('dataRegistro','20251124') or '20251124')
+                inp_dt_reg     = st.text_input("Data Registro",      value=cab_sgw.get('dataRegistro','20251124') or '20251124')
+                inp_dt_emb     = st.text_input("Data Embarque",      value=cab_sgw.get('dataEmbarqueISO','20251025') or '20251025')
+            with xc2:
+                st.markdown("**Pesos (formato XML)**")
+                _pb = DataFormatter.format_quantity(cab_sgw.get('pesoBruto','0'),15) if cab_sgw.get('pesoBruto') else '000000000000000'
+                _pl = DataFormatter.format_quantity(cab_sgw.get('pesoLiquido','0'),15) if cab_sgw.get('pesoLiquido') else '000000000000000'
+                inp_peso_bruto   = st.text_input("Peso Bruto (XML)",    value=_pb)
+                inp_peso_liq     = st.text_input("Peso Líquido (XML)",  value=_pl)
+                st.markdown("**Locais (R$ / US$)**")
+                inp_loc_desc_dol = st.text_input("Descarga US$",        value="000000000000000")
+                inp_loc_desc_rea = st.text_input("Descarga R$",         value="000000000000000")
+                inp_loc_emb_dol  = st.text_input("Embarque US$",        value="000000000000000")
+                inp_loc_emb_rea  = st.text_input("Embarque R$",         value="000000000000000")
+            with xc3:
+                st.markdown("**Pagamento & Conhecimento**")
+                inp_agencia    = st.text_input("Agência", value=cab_sgw.get('agencia','3715') or '3715')
+                inp_banco      = st.text_input("Banco",   value="341")
+                inp_idt_conhec = st.text_input("IDT Conhecimento", value=cab_sgw.get('idtConhecimento','CE123456') or 'CE123456')
+                inp_idt_master = st.text_input("IDT Master",       value=cab_sgw.get('idtMaster','CE123456') or 'CE123456')
+                st.markdown("**Receita 7811**")
+                inp_valor_7811 = st.text_input("Valor 7811", value="000000000000000")
+
+        user_xml_config = {
+            "quantidadeVolume":              inp_qtd_volume,
+            "cargaDataChegada":              inp_dt_chegada,
+            "dataDesembaraco":               inp_dt_desemb,
+            "dataRegistro":                  inp_dt_reg,
+            "conhecimentoCargaEmbarqueData": inp_dt_emb,
+            "cargaPesoBruto":                inp_peso_bruto,
+            "cargaPesoLiquido":              inp_peso_liq,
+            "agenciaPagamento":              inp_agencia,
+            "bancoPagamento":                inp_banco,
+            "valorReceita7811":              inp_valor_7811,
+            "localDescargaTotalDolares":     inp_loc_desc_dol,
+            "localDescargaTotalReais":       inp_loc_desc_rea,
+            "localEmbarqueTotalDolares":     inp_loc_emb_dol,
+            "localEmbarqueTotalReais":       inp_loc_emb_rea,
+            "conhecimentoCargaId":           inp_idt_conhec,
+            "conhecimentoCargaIdMaster":     inp_idt_master,
+        }
+
+        st.divider()
+
+        if st.session_state["merged_df"] is not None:
+            if st.button("⚙️ Gerar XML (Layout 8686)", type="primary", use_container_width=True):
+                try:
+                    p       = st.session_state["parsed_duimp"]
+                    records = st.session_state["merged_df"].to_dict("records")
+                    for i, item in enumerate(p.items):
+                        if i < len(records):
+                            item.update(records[i])
+                    builder   = XMLBuilder(p)
+                    xml_bytes = builder.build(user_inputs=user_xml_config)
+                    duimp_num = p.header.get("numeroDUIMP","0000").replace("/","-")
+                    file_name = f"DUIMP_{duimp_num}_INTEGRADO.xml"
+                    st.download_button(
+                        "⬇️ Baixar XML", data=xml_bytes, file_name=file_name,
+                        mime="text/xml", use_container_width=True
+                    )
+                    st.success("✅ XML gerado com sucesso!")
+                    with st.expander("👁️ Preview XML (3000 primeiros caracteres)"):
+                        st.code(xml_bytes.decode('utf-8', errors='ignore')[:3000], language='xml')
+                except Exception as e:
+                    st.error(f"Erro na geração do XML: {e}")
+                    st.code(traceback.format_exc())
+        else:
+            st.markdown("""
+            <div class="empty-state">
+                <div class="empty-state-icon">💾</div>
+                <div class="empty-state-title">Nenhum dado disponível</div>
+                <div class="empty-state-sub">Realize o upload e a vinculação antes de gerar o XML</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+# ==============================================================================
+# APLICAÇÃO PRINCIPAL
+# ==============================================================================
+def main():
+    load_css()
+
+    st.markdown("""
+    <div class="hero">
+        <img src="https://raw.githubusercontent.com/DaniloNs-creator/final/7ea6ab2a610ef8f0c11be3c34f046e7ff2cdfc6a/haefele_logo.png"
+             class="hero-logo" alt="Häfele">
+        <h1 class="hero-title">Sistema de Processamento Unificado 2026</h1>
+        <p class="hero-sub">TXT · CT-e · DUIMP — Análise e geração de XML fiscal</p>
+        <div class="hero-chips">
+            <span class="chip">📄 TXT</span>
+            <span class="chip">🚚 CT-e</span>
+            <span class="chip">📊 DUIMP</span>
+            <span class="chip">🔵 Sigraweb</span>
+            <span class="chip">🟠 Extrato DUIMP</span>
+            <span class="chip">⚙️ XML 8686</span>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab1, tab2, tab3 = st.tabs([
+        "📄  Processador TXT",
+        "🚚  Processador CT-e",
+        "📊  Sistema Integrado DUIMP"
+    ])
+    with tab1:
+        processador_txt()
+    with tab2:
+        processador_cte()
+    with tab3:
+        sistema_integrado_duimp()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Ocorreu um erro inesperado: {str(e)}")
+        st.code(traceback.format_exc())
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 1 — UPLOAD E VINCULAÇÃO
