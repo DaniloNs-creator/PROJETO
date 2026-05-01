@@ -31,14 +31,17 @@ import random
 
 # ==============================================================================
 # CONFIGURAÇÃO AUTOMÁTICA DO SERVIDOR STREAMLIT
+# Suporta PDFs gigantes — até 2 GB
 # ==============================================================================
+_PDF_CHUNK_PAGES = 50  # Páginas processadas por lote — evita OOM em PDFs de 1000+ páginas
+
 def setup_streamlit_config():
     try:
         os.makedirs(".streamlit", exist_ok=True)
         config_path = os.path.join(".streamlit", "config.toml")
-        if not os.path.exists(config_path):
-            with open(config_path, "w", encoding="utf-8") as f:
-                f.write("[server]\nmaxUploadSize = 1000\nmaxMessageSize = 1000\n")
+        # Sempre sobrescreve para garantir os limites corretos
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("[server]\nmaxUploadSize = 2000\nmaxMessageSize = 2000\n")
     except Exception:
         pass
 
@@ -774,10 +777,17 @@ def processador_cte():
 # PARTE 3A — PARSER EXTRATO DUIMP (layout antigo / HafelePDFParser)
 # ==============================================================================
 class HafelePDFParser:
-    """Parser BLINDADO para o layout Extrato DUIMP (APP2 original)."""
+    """
+    Parser para o layout Extrato DUIMP (APP2 original).
+    Processa em lotes de _PDF_CHUNK_PAGES páginas para suportar PDFs
+    gigantes (1000+ páginas) sem travar por falta de memória.
+    O buffer de overlap garante que itens que cruzam a fronteira
+    entre lotes não sejam perdidos.
+    """
 
     def __init__(self):
         self.documento = {'cabecalho': {}, 'itens': [], 'totais': {}}
+        self._buffer   = ""
 
     @staticmethod
     def _parse_valor(v: str) -> float:
@@ -787,40 +797,86 @@ class HafelePDFParser:
 
     def parse_pdf(self, pdf_path: str) -> Dict:
         try:
-            text_chunks = []
-            prog_txt = st.empty(); prog_bar = st.progress(0)
+            prog_txt = st.empty()
+            prog_bar = st.progress(0)
+            items_found: list = []
+            self._buffer = ""
+
             with pdfplumber.open(pdf_path) as pdf:
                 total = len(pdf.pages)
-                for i, page in enumerate(pdf.pages):
-                    prog_txt.text(f"Lendo página {i+1} de {total}...")
-                    prog_bar.progress((i+1)/total)
-                    t = page.extract_text(layout=False)
-                    if t: text_chunks.append(t)
-            prog_txt.empty(); prog_bar.empty()
-            full_text = "\n".join(text_chunks)
-            self._process_full_text(full_text)
-            del text_chunks, full_text; gc.collect()
+                chunk = _PDF_CHUNK_PAGES
+
+                for start in range(0, total, chunk):
+                    end = min(start + chunk, total)
+                    prog_txt.text(
+                        f"Processando páginas {start+1}–{end} de {total} "
+                        f"(Extrato DUIMP)... {int((end/total)*100)}%"
+                    )
+                    prog_bar.progress(end / total)
+
+                    chunk_lines = []
+                    for page in pdf.pages[start:end]:
+                        t = page.extract_text(layout=False)
+                        if t: chunk_lines.append(t)
+
+                    chunk_text = self._buffer + "\n".join(chunk_lines)
+                    is_last    = (end == total)
+                    new_items, self._buffer = self._extract_items_from_chunk(
+                        chunk_text, is_last=is_last
+                    )
+                    items_found.extend(new_items)
+                    del chunk_lines, chunk_text
+                    gc.collect()
+
+            prog_txt.empty()
+            prog_bar.empty()
+
+            if self._buffer.strip():
+                new_items, _ = self._extract_items_from_chunk(self._buffer, is_last=True)
+                items_found.extend(new_items)
+
+            if not items_found:
+                st.warning("⚠️ Padrão 'ITENS DA DUIMP' não encontrado. Verifique o formato do PDF.")
+
+            self.documento['itens'] = items_found
+            self._calculate_totals()
             return self.documento
+
         except Exception as e:
             logger.error(f"Erro HafelePDFParser: {e}")
             st.error(f"Erro ao ler PDF: {str(e)}")
             return self.documento
 
-    def _process_full_text(self, text: str):
-        chunks = re.split(r'(ITENS\s+DA\s+DUIMP\s*-\s*\d+)', text, flags=re.IGNORECASE)
+    def _extract_items_from_chunk(self, text: str, is_last: bool):
+        """
+        Divide o chunk pelo padrão de item do Extrato DUIMP.
+        Retorna (itens_completos, buffer_residual).
+        """
+        pattern = r'(ITENS\s+DA\s+DUIMP\s*-\s*\d+)'
+        parts = re.split(pattern, text, flags=re.IGNORECASE)
         items_found = []
-        if len(chunks) > 1:
-            for i in range(1, len(chunks), 2):
-                header  = chunks[i]
-                content = chunks[i+1] if (i+1) < len(chunks) else ''
-                m = re.search(r'(\d+)', header)
-                num = int(m.group(1)) if m else i
-                item = self._parse_item_block(num, content)
-                if item: items_found.append(item)
+
+        if len(parts) <= 1:
+            return items_found, (text if not is_last else "")
+
+        n_complete = len(parts) - 1 if not is_last else len(parts)
+
+        for i in range(1, n_complete, 2):
+            header  = parts[i]
+            content = parts[i+1] if (i+1) < len(parts) else ''
+            m = re.search(r'(\d+)', header)
+            num = int(m.group(1)) if m else (i // 2)
+            item = self._parse_item_block(num, content)
+            if item: items_found.append(item)
+
+        if not is_last and len(parts) >= 2:
+            last_header  = parts[-2] if len(parts) % 2 == 0 else ""
+            last_content = parts[-1]
+            residual = last_header + last_content
         else:
-            st.warning("⚠️ Padrão 'ITENS DA DUIMP' não encontrado. Verifique o formato do PDF.")
-        self.documento['itens'] = items_found
-        self._calculate_totals()
+            residual = ""
+
+        return items_found, residual
 
     def _parse_item_block(self, item_num: int, text: str) -> Dict:
         try:
@@ -901,7 +957,12 @@ class HafelePDFParser:
 # PARTE 3B — PARSER SIGRAWEB (layout novo)
 # ==============================================================================
 class SigrawebPDFParser:
-    """Parser dedicado para o layout Sigraweb — Conferência do Processo Detalhado."""
+    """
+    Parser para o layout Sigraweb — Conferência do Processo Detalhado.
+    Processa em lotes de _PDF_CHUNK_PAGES páginas.
+    Fase 1: extrai cabeçalho das 2 primeiras páginas.
+    Fase 2: processa adições em chunks liberando memória a cada lote.
+    """
 
     def __init__(self):
         self.documento = {'cabecalho': {}, 'itens': [], 'totais': {}}
@@ -921,28 +982,92 @@ class SigrawebPDFParser:
 
     def parse_pdf(self, pdf_path: str) -> Dict:
         try:
-            text_chunks = []
-            prog_txt = st.empty(); prog_bar = st.progress(0)
+            prog_txt = st.empty()
+            prog_bar = st.progress(0)
+            items_found: list = []
+            buffer = ""
+
             with pdfplumber.open(pdf_path) as pdf:
                 total = len(pdf.pages)
-                for i, page in enumerate(pdf.pages):
-                    prog_txt.text(f"Lendo página {i+1} de {total} (Sigraweb)...")
-                    prog_bar.progress((i+1)/total)
-                    t = page.extract_text(layout=False)
-                    if t: text_chunks.append(t)
-            prog_txt.empty(); prog_bar.empty()
-            full_text = "\n".join(text_chunks)
-            p1 = text_chunks[0] if text_chunks else ""
-            p2 = text_chunks[1] if len(text_chunks)>1 else ""
-            self._extract_header(p1, p2)
-            self._extract_items(full_text)
+                chunk = _PDF_CHUNK_PAGES
+
+                # Fase 1: cabeçalho (primeiras 2 páginas)
+                p1 = pdf.pages[0].extract_text(layout=False) or "" if total > 0 else ""
+                p2 = pdf.pages[1].extract_text(layout=False) or "" if total > 1 else ""
+                self._extract_header(p1, p2)
+                del p1, p2
+
+                # Fase 2: adições em chunks
+                for start in range(0, total, chunk):
+                    end = min(start + chunk, total)
+                    prog_txt.text(
+                        f"Processando páginas {start+1}–{end} de {total} "
+                        f"(Sigraweb)... {int((end/total)*100)}%"
+                    )
+                    prog_bar.progress(end / total)
+
+                    chunk_pages = []
+                    for page in pdf.pages[start:end]:
+                        t = page.extract_text(layout=False)
+                        if t: chunk_pages.append(t)
+
+                    chunk_text = buffer + "\n".join(chunk_pages)
+                    is_last    = (end == total)
+                    new_items, buffer = self._extract_items_from_chunk(
+                        chunk_text, is_last=is_last
+                    )
+                    items_found.extend(new_items)
+                    del chunk_pages, chunk_text
+                    gc.collect()
+
+            prog_txt.empty()
+            prog_bar.empty()
+
+            if buffer.strip():
+                new_items, _ = self._extract_items_from_chunk(buffer, is_last=True)
+                items_found.extend(new_items)
+
+            if not items_found:
+                st.warning("⚠️ Nenhuma adição detectada no PDF Sigraweb.")
+
+            self.documento['itens'] = items_found
             self._calculate_totals()
-            del text_chunks, full_text; gc.collect()
             return self.documento
+
         except Exception as e:
             logger.error(f"Erro SigrawebPDFParser: {e}")
             st.error(f"Erro ao ler PDF Sigraweb: {str(e)}")
             return self.documento
+
+    def _extract_items_from_chunk(self, text: str, is_last: bool):
+        """
+        Divide o chunk pelo padrão de adição do Sigraweb.
+        Retorna (itens_completos, buffer_residual).
+        """
+        pattern = r'Informações da Adição Nº:\s*(\d+)'
+        parts   = re.split(pattern, text)
+        items_found = []
+
+        if len(parts) <= 1:
+            return items_found, (text if not is_last else "")
+
+        n_complete = len(parts) - 1 if not is_last else len(parts)
+
+        for i in range(1, n_complete, 2):
+            num_str = parts[i].strip()
+            content = parts[i+1] if (i+1) < len(parts) else ''
+            item    = self._parse_item_block(num_str, content)
+            if item: items_found.append(item)
+
+        if not is_last and len(parts) >= 2:
+            last_num     = parts[-2] if len(parts) % 2 == 0 else ""
+            last_content = parts[-1]
+            residual = (f"Informações da Adição Nº: {last_num}\n"
+                        if last_num else "") + last_content
+        else:
+            residual = ""
+
+        return items_found, residual
 
     def _extract_header(self, p1: str, p2: str):
         def _f(pat, text, default=''):
@@ -1005,20 +1130,6 @@ class SigrawebPDFParser:
         h['dataEmbarqueISO'] = self._fmt_date(h['dataEmbarque']) if h['dataEmbarque'] else ''
         h['dataChegadaISO']  = self._fmt_date(h['dataChegada'])  if h['dataChegada']  else ''
         self.documento['cabecalho'] = h
-
-    def _extract_items(self, full_text: str):
-        chunks = re.split(r'Informações da Adição Nº:\s*(\d+)', full_text)
-        items_found = []
-        if len(chunks) <= 1:
-            st.warning("⚠️ Nenhuma adição detectada no PDF Sigraweb.")
-            self.documento['itens'] = []
-            return
-        for i in range(1, len(chunks), 2):
-            num     = chunks[i].strip()
-            content = chunks[i+1] if (i+1)<len(chunks) else ''
-            item    = self._parse_item_block(num, content)
-            if item: items_found.append(item)
-        self.documento['itens'] = items_found
 
     def _parse_item_block(self, num_str: str, text: str) -> Optional[Dict]:
         try:
@@ -1127,24 +1238,56 @@ def montar_descricao_final(desc_complementar, codigo_extra, detalhamento):
 
 
 class DuimpPDFParser:
-    """Parser do App 1 (Extrato DUIMP / Siscomex)."""
-    def __init__(self, file_stream):
-        self.doc = fitz.open(stream=file_stream, filetype="pdf")
+    """
+    Parser do App 1 (Extrato DUIMP / Siscomex).
+    CORREÇÃO DE MEMÓRIA:
+    - Recebe path em disco (não bytes em RAM) → zero cópia dupla do PDF
+    - Processa em lotes de _PDF_CHUNK_PAGES páginas via fitz
+    """
+    def __init__(self, pdf_path: str):
+        self.pdf_path  = pdf_path   # path em disco — não bytes em memória
         self.full_text = ""
         self.header    = {}
         self.items     = []
 
     def preprocess(self):
-        clean = []
-        for page in self.doc:
-            for line in page.get_text("text").split('\n'):
-                ls = line.strip()
-                if "Extrato da DUIMP" in ls: continue
-                if "Data, hora e responsável" in ls: continue
-                if re.match(r'^\d+\s*/\s*\d+$', ls): continue
-                clean.append(line)
-        self.full_text = "\n".join(clean)
-        self.doc.close(); gc.collect()
+        """
+        Lê páginas em chunks, filtra ruído e acumula texto limpo.
+        Usa fitz.open(path) — sem cópia do PDF em RAM.
+        """
+        prog_txt = st.empty()
+        prog_bar = st.progress(0)
+        doc      = fitz.open(self.pdf_path)     # path, não stream
+        total    = doc.page_count
+        parts    = []
+
+        for start in range(0, total, _PDF_CHUNK_PAGES):
+            end = min(start + _PDF_CHUNK_PAGES, total)
+            prog_txt.text(f"Pré-processando páginas {start+1}–{end} de {total} (DUIMP)...")
+            prog_bar.progress(end / total)
+
+            chunk_lines = []
+            for idx in range(start, end):
+                page = doc[idx]
+                for line in page.get_text("text").split('\n'):
+                    ls = line.strip()
+                    if "Extrato da DUIMP" in ls: continue
+                    if "Data, hora e responsável" in ls: continue
+                    if re.match(r'^\d+\s*/\s*\d+$', ls): continue
+                    chunk_lines.append(line)
+                page = None  # libera ref da página
+
+            parts.append("\n".join(chunk_lines))
+            del chunk_lines
+            gc.collect()
+
+        doc.close()
+        prog_txt.empty()
+        prog_bar.empty()
+
+        self.full_text = "\n".join(parts)
+        del parts
+        gc.collect()
 
     def extract_header(self):
         t = self.full_text
@@ -1788,12 +1931,19 @@ def sistema_integrado_duimp():
             file_app2 = st.file_uploader(key2, type="pdf", key="u2",
                                          label_visibility="collapsed")
 
-        # ── Processar APP1 ────────────────────────────────────────────────
+        # ── Processar APP1 (DUIMP) ────────────────────────────────────────
+        # Salva em tempfile antes de passar ao DuimpPDFParser.
+        # Evita carregar o PDF inteiro em RAM duas vezes.
         if file_duimp:
             if (st.session_state["parsed_duimp"] is None or
                     file_duimp.name != getattr(st.session_state.get("last_duimp"),"name","")):
+                _td_path = None
                 try:
-                    p = DuimpPDFParser(file_duimp.read())
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as _td:
+                        _td.write(file_duimp.read())
+                        _td_path = _td.name
+
+                    p = DuimpPDFParser(_td_path)   # path, não bytes
                     p.preprocess(); p.extract_header(); p.extract_items()
                     st.session_state["parsed_duimp"] = p
                     st.session_state["last_duimp"]   = file_duimp
@@ -1808,6 +1958,10 @@ def sistema_integrado_duimp():
                     status_ok(f"DUIMP lida — {len(p.items)} adições encontradas.")
                 except Exception as e:
                     st.error(f"Erro ao ler DUIMP: {e}")
+                finally:
+                    if _td_path and os.path.exists(_td_path):
+                        try: os.unlink(_td_path)
+                        except Exception: pass
 
         # ── Processar APP2 ────────────────────────────────────────────────
         if file_app2 and st.session_state["parsed_sigraweb"] is None:
