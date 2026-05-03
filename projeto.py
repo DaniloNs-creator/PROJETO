@@ -1,889 +1,1288 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import numpy as np
+from io import BytesIO
+import requests
 import plotly.graph_objects as go
-from io import StringIO, BytesIO
-import re
-import os
-import tempfile
-from collections import defaultdict
+import base64  # Para converter imagens em base64
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+import json  # Para salvar e carregar dados em formato JSON
 
-# ──────────────────────────────────────────────
-# PAGE CONFIG
-# ──────────────────────────────────────────────
-st.set_page_config(
-    page_title="Analisador SPED – EFD Contribuições & ICMS/IPI",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# ──────────────────────────────────────────────
-# CST TABLES
-# ──────────────────────────────────────────────
-CST_PIS_COFINS = {
-    "01": ("Operação Tributável – BC Valor Operação", True),
-    "02": ("Operação Tributável – BC Valor Operação – Alíquota Diferenciada", True),
-    "03": ("Operação Tributável – BC Qtd Vendida × Alíquota por Unidade", True),
-    "04": ("Operação Tributável Monofásica – Revenda", False),
-    "05": ("Operação Tributável Substituição Tributária", False),
-    "06": ("Operação Tributável – Alíquota Zero", False),
-    "07": ("Operação Isenta da Contribuição", False),
-    "08": ("Operação Sem Incidência da Contribuição", False),
-    "09": ("Operação com Suspensão da Contribuição", False),
-    "49": ("Outras Operações de Saída", False),
-    "50": ("Op. com Direito a Crédito – Vinculada Exclus. Receita Tributada no Mercado Interno", True),
-    "51": ("Op. com Direito a Crédito – Vinculada Exclus. Receita Não Tributada no Mercado Interno", True),
-    "52": ("Op. com Direito a Crédito – Vinculada Exclus. Receita de Exportação", True),
-    "53": ("Op. com Direito a Crédito – Vinculada a Receitas Tributadas e Não Tributadas no Mercado Interno", True),
-    "54": ("Op. com Direito a Crédito – Vinculada a Receitas Tributadas no Mercado Interno e de Exportação", True),
-    "55": ("Op. com Direito a Crédito – Vinculada a Receitas Não Tributadas no Mercado Interno e de Exportação", True),
-    "56": ("Op. com Direito a Crédito – Vinculada a Receitas Tributadas e Não Tributadas no Mercado Interno e de Exportação", True),
-    "60": ("Crédito Presumido – Op. Aquisição Vinculada Exclus. Receita Tributada no Mercado Interno", True),
-    "61": ("Crédito Presumido – Op. Aquisição Vinculada Exclus. Receita Não Tributada no Mercado Interno", True),
-    "62": ("Crédito Presumido – Op. Aquisição Vinculada Exclus. Receita de Exportação", True),
-    "63": ("Crédito Presumido – Op. Aquisição Vinculada a Receitas Tributadas e Não Tributadas no Mercado Interno", True),
-    "64": ("Crédito Presumido – Op. Aquisição Vinculada a Receitas Tributadas no Mercado Interno e de Exportação", True),
-    "65": ("Crédito Presumido – Op. Aquisição Vinculada a Receitas Não Tributadas no Mercado Interno e de Exportação", True),
-    "66": ("Crédito Presumido – Op. Aquisição Vinculada a Receitas Tributadas e Não Tributadas no Mercado Interno e de Exportação", True),
-    "67": ("Crédito Presumido – Outras Operações", True),
-    "70": ("Operação de Aquisição Sem Direito a Crédito", False),
-    "71": ("Operação de Aquisição com Isenção", False),
-    "72": ("Operação de Aquisição com Suspensão", False),
-    "73": ("Operação de Aquisição a Alíquota Zero", False),
-    "74": ("Operação de Aquisição Sem Incidência da Contribuição", False),
-    "75": ("Operação de Aquisição por Substituição Tributária", False),
-    "98": ("Outras Operações de Entrada", False),
-    "99": ("Outras Operações", False),
-}
-
-CST_ICMS = {
-    "00": ("Tributada Integralmente", True),
-    "10": ("Tributada e com Cobrança de ICMS por ST", True),
-    "20": ("Com Redução de BC", True),
-    "30": ("Isenta ou Não Tributada e com Cobrança de ICMS por ST", False),
-    "40": ("Isenta", False),
-    "41": ("Não Tributada", False),
-    "50": ("Com Suspensão", False),
-    "51": ("Com Diferimento", True),
-    "60": ("ICMS Cobrado Anteriormente por ST", False),
-    "70": ("Com Redução de BC e Cobrança de ICMS por ST", True),
-    "90": ("Outras", False),
-}
-
-CST_IPI = {
-    # Entradas
-    "00": ("Entrada com Recuperação de Crédito", True),
-    "01": ("Entrada Tributada com Alíquota Zero", False),
-    "02": ("Entrada Isenta", False),
-    "03": ("Entrada Não Tributada", False),
-    "04": ("Entrada Imune", False),
-    "05": ("Entrada com Suspensão", False),
-    "49": ("Outras Entradas", False),
-    # Saídas
-    "50": ("Saída Tributada", True),
-    "51": ("Saída Tributável com Alíquota Zero", False),
-    "52": ("Saída Isenta", False),
-    "53": ("Saída Não Tributada", False),
-    "54": ("Saída Imune", False),
-    "55": ("Saída com Suspensão", False),
-    "99": ("Outras Saídas", False),
-}
-
-# ──────────────────────────────────────────────
-# PARSER ROBUSTO (sem depender de sped lib para leitura)
-# ──────────────────────────────────────────────
-
-def parse_sped_file(content: str):
-    """Parse SPED file content into a dict of {registro: [list of dicts]}."""
-    registros = defaultdict(list)
-    linhas_raw = {}  # reg_key -> list of raw lines
-    errors = []
-
-    lines = content.splitlines()
-    total = len(lines)
-
-    for i, line in enumerate(lines):
-        line = line.strip()
-        if not line:
-            continue
-        # Remove leading/trailing pipes if present
-        if line.startswith("|") and line.endswith("|"):
-            parts = line[1:-1].split("|")
-        elif "|" in line:
-            parts = line.split("|")
-            if parts[0] == "":
-                parts = parts[1:]
-            if parts and parts[-1] == "":
-                parts = parts[:-1]
-        else:
-            continue
-
-        if not parts:
-            continue
-
-        reg = parts[0].strip().upper()
-        if not re.match(r'^[0-9A-Z]{4,5}$', reg):
-            continue
-
-        registros[reg].append(parts)
-        if reg not in linhas_raw:
-            linhas_raw[reg] = []
-        linhas_raw[reg].append(i + 1)
-
-    return registros, linhas_raw, errors
-
-
-def detect_tipo(registros):
-    """Detect if file is EFD Contribuições (PIS/COFINS) or ICMS/IPI."""
-    # EFD Contribuições has blocks C, D, F, I, M, P, 1, A
-    # EFD ICMS/IPI has blocks B, C, D, E, G, H, K
-    contrib_blocos = {"M100", "M200", "M300", "M400", "P100", "F100", "F200"}
-    icms_blocos = {"E100", "E110", "E500", "G100", "H010", "K100"}
-
-    contrib_score = sum(1 for r in contrib_blocos if r in registros)
-    icms_score = sum(1 for r in icms_blocos if r in registros)
-
-    if contrib_score > icms_score:
-        return "EFD Contribuições (PIS/COFINS)"
-    elif icms_score > contrib_score:
-        return "EFD ICMS/IPI"
-    else:
-        return "Indeterminado"
-
-
-# ──────────────────────────────────────────────
-# FIELD MAPS for key registers
-# ──────────────────────────────────────────────
-
-# EFD CONTRIBUIÇÕES field maps
-CAMPOS_CONTRIB = {
-    "0000": ["REG","COD_VER","TIPO_ESCRIT","IND_SIT_ESP","NUM_REC_ANTERIOR","DT_INI","DT_FIN","NOME","CNPJ","UF","COD_MUN","SUFRAMA","IND_NAT_PJ","IND_ATIV"],
-    "C100": ["REG","IND_OPER","IND_EMIT","COD_PART","COD_MOD","COD_SIT","SER","NUM_DOC","CHAVE_NFE","DT_DOC","DT_EXE_FEC","VL_DOC","IND_PGTO","VL_DESC","VL_ABAT_NT","VL_MERC","IND_FRT","VL_FRT","VL_SEG","VL_OUT_DA","VL_BC_ICMS","VL_ICMS","VL_BC_ICMS_ST","VL_ICMS_ST","VL_IPI","VL_PIS","VL_COFINS","VL_PIS_ST","VL_COFINS_ST"],
-    "C170": ["REG","NUM_ITEM","COD_ITEM","DESCR_COMPL","QTD","UNID","VL_ITEM","VL_DESC","IND_MOV","CST_ICMS","CFOP","COD_NAT","VL_BC_ICMS","ALIQ_ICMS","VL_ICMS","VL_BC_ICMS_ST","ALIQ_ST","VL_ICMS_ST","IND_APUR","CST_IPI","COD_ENQ","VL_BC_IPI","ALIQ_IPI","VL_IPI","CST_PIS","VL_BC_PIS","ALIQ_PIS","QUANT_BC_PIS","ALIQ_PIS_QUANT","VL_PIS","CST_COFINS","VL_BC_COFINS","ALIQ_COFINS","QUANT_BC_COFINS","ALIQ_COFINS_QUANT","VL_COFINS","COD_CTA"],
-    "C175": ["REG","CFOP","VL_OPR","VL_DESC_GLB","VL_BC_ICMS","VL_ICMS","VL_BC_ICMS_ST","VL_ICMS_ST","CST_PIS","VL_BC_PIS","ALIQ_PIS","QUANT_BC_PIS","ALIQ_PIS_QUANT","VL_PIS","CST_COFINS","VL_BC_COFINS","ALIQ_COFINS","QUANT_BC_COFINS","ALIQ_COFINS_QUANT","VL_COFINS","COD_CTA"],
-    "C180": ["REG","COD_CRED","IND_ORIG_CRED","CFOP","QUANT_BC_PIS","ALIQ_PIS_QUANT","VL_BC_PIS","ALIQ_PIS","VL_PIS","QUANT_BC_COFINS","ALIQ_COFINS_QUANT","VL_BC_COFINS","ALIQ_COFINS","VL_COFINS","COD_CTA"],
-    "C190": ["REG","CST_ICMS","CFOP","ALIQ_ICMS","VL_OPR","VL_BC_ICMS","VL_ICMS","VL_BC_ICMS_ST","VL_ICMS_ST","VL_RED_BC","VL_IPI","COD_OBS"],
-    "D100": ["REG","IND_OPER","IND_EMIT","COD_PART","COD_MOD","COD_SIT","SER","SUB","NUM_DOC","CHV_CTE","DT_DOC","DT_A_P","TP_CT_e","CHVE_CTE","VL_DOC","VL_DESC","IND_FRT","VL_SERV","VL_BC_ICMS","VL_ICMS","VL_NT","VL_PIS","VL_COFINS","CST_PIS","VL_BC_PIS","ALIQ_PIS","VL_PIS_EF","CST_COFINS","VL_BC_COFINS","ALIQ_COFINS","VL_COFINS_EF"],
-    "F100": ["REG","IND_OPER","COD_PART","COD_ITEM","DT_OPER","VL_OPER","CST_PIS","VL_BC_PIS","ALIQ_PIS","VL_PIS","CST_COFINS","VL_BC_COFINS","ALIQ_COFINS","VL_COFINS","NAT_BC_CRED","IND_ORIG_CRED","COD_CTA","COD_CCUS"],
-    "M100": ["REG","COD_CRED","IND_CRED_ORI","VL_BC_PIS","ALIQ_PIS","QUANT_BC_PIS","VL_CRED","VL_AJUS_ACRES","VL_AJUS_REDUC","VL_CRED_DIF","VL_CRED_DISP","IND_DESC_CRED","VL_CRED_DESC","SLD_CRED"],
-    "M200": ["REG","VL_TOT_CONT_NC_PER","VL_TOT_CRED_DESC","VL_TOT_CONT_NC_DEV","VL_RET_NC","VL_OUT_DED_NC","VL_CONT_NC_REC","VL_TOT_CONT_CUM_PER","VL_RET_CUM","VL_OUT_DED_CUM","VL_CONT_CUM_REC","VL_TOT_CONT_REC"],
-    "M500": ["REG","COD_CRED","IND_CRED_ORI","VL_BC_COFINS","ALIQ_COFINS","QUANT_BC_COFINS","VL_CRED","VL_AJUS_ACRES","VL_AJUS_REDUC","VL_CRED_DIF","VL_CRED_DISP","IND_DESC_CRED","VL_CRED_DESC","SLD_CRED"],
-    "M600": ["REG","VL_TOT_CONT_NC_PER","VL_TOT_CRED_DESC","VL_TOT_CONT_NC_DEV","VL_RET_NC","VL_OUT_DED_NC","VL_CONT_NC_REC","VL_TOT_CONT_CUM_PER","VL_RET_CUM","VL_OUT_DED_CUM","VL_CONT_CUM_REC","VL_TOT_CONT_REC"],
-}
-
-# EFD ICMS/IPI field maps
-CAMPOS_ICMS = {
-    "0000": ["REG","COD_VER","TIPO_ESCRIT","IND_SIT_ESP","NUM_REC_ANTERIOR","DT_INI","DT_FIN","NOME","CNPJ","CPF","UF","IE","COD_MUN","IM","SUFRAMA","IND_PERFIL","IND_ATIV"],
-    "C100": ["REG","IND_OPER","IND_EMIT","COD_PART","COD_MOD","COD_SIT","SER","NUM_DOC","CHV_NFE","DT_DOC","DT_E_S","VL_DOC","IND_PGTO","VL_DESC","VL_ABAT_NT","VL_MERC","IND_FRT","VL_FRT","VL_SEG","VL_OUT_DA","VL_BC_ICMS","VL_ICMS","VL_BC_ICMS_ST","VL_ICMS_ST","VL_IPI","VL_PIS","VL_COFINS","VL_PIS_ST","VL_COFINS_ST"],
-    "C170": ["REG","NUM_ITEM","COD_ITEM","DESCR_COMPL","QTD","UNID","VL_ITEM","VL_DESC","IND_MOV","CST_ICMS","CFOP","COD_NAT","VL_BC_ICMS","ALIQ_ICMS","VL_ICMS","VL_BC_ICMS_ST","ALIQ_ST","VL_ICMS_ST","IND_APUR","CST_IPI","COD_ENQ","VL_BC_IPI","ALIQ_IPI","VL_IPI","CST_PIS","VL_BC_PIS","ALIQ_PIS","QUANT_BC_PIS","ALIQ_PIS_QUANT","VL_PIS","CST_COFINS","VL_BC_COFINS","ALIQ_COFINS","QUANT_BC_COFINS","ALIQ_COFINS_QUANT","VL_COFINS","COD_CTA"],
-    "C190": ["REG","CST_ICMS","CFOP","ALIQ_ICMS","VL_OPR","VL_BC_ICMS","VL_ICMS","VL_BC_ICMS_ST","VL_ICMS_ST","VL_RED_BC","VL_IPI","COD_OBS"],
-    "E100": ["REG","DT_INI","DT_FIN"],
-    "E110": ["REG","VL_TOT_DEBITOS","VL_AJ_DEBITOS","VL_TOT_AJ_DEBITOS","VL_ESTORNOS_CRED","VL_TOT_CREDITOS","VL_AJ_CREDITOS","VL_TOT_AJ_CREDITOS","VL_ESTORNOS_DEB","VL_SLD_CREDOR_ANT","VL_SLD_APURADO","VL_TOT_DED","VL_ICMS_RECOLHER","VL_SLD_CREDOR_TRANSPORTAR","DEB_ESP"],
-    "E500": ["REG","IND_APUR"],
-    "E510": ["REG","CFOP","CST_IPI","ALIQ_IPI","VL_OPR","VL_BC_IPI","VL_IPI"],
-    "E520": ["REG","VL_SD_ANT_IPI","VL_DEB_IPI","VL_CRED_IPI","VL_OD_IPI","VL_OC_IPI","VL_SC_IPI","VL_SD_IPI"],
-    "H010": ["REG","DT_INV","VL_INV"],
-    "H020": ["REG","CST_ICMS","BC_ICMS","VL_ICMS"],
-    "K100": ["REG","DT_INI","DT_FIN"],
-    "K200": ["REG","DT_EST","COD_ITEM","QTD","IND_EST","COD_PART"],
-}
-
-# ──────────────────────────────────────────────
-# VALIDATION ENGINE
-# ──────────────────────────────────────────────
-
-def to_float(val):
-    try:
-        return float(str(val).replace(",", ".").strip())
-    except:
-        return None
-
-
-def validate_cst_pis_cofins(row: dict, reg_name: str):
-    """Validate PIS/COFINS CST rules."""
-    issues = []
-    for tributo in ["PIS", "COFINS"]:
-        cst_field = f"CST_{tributo}"
-        bc_field = f"VL_BC_{tributo}"
-        aliq_field = f"ALIQ_{tributo}"
-        vl_field = f"VL_{tributo}"
-        quant_bc = f"QUANT_BC_{tributo}"
-        aliq_quant = f"ALIQ_{tributo}_QUANT"
-
-        cst = str(row.get(cst_field, "")).strip().zfill(2)
-        if not cst or cst == "00":
-            continue
-
-        cst_info = CST_PIS_COFINS.get(cst)
-        if not cst_info:
-            issues.append({
-                "registro": reg_name,
-                "campo": cst_field,
-                "cst": cst,
-                "tipo": "CST Inválido",
-                "detalhe": f"CST {cst} não encontrado na tabela oficial",
-                "gravidade": "ERRO"
-            })
-            continue
-
-        descricao, requer_tributo = cst_info
-
-        if requer_tributo:
-            # CST that requires BC, ALIQ, VL
-            bc = to_float(row.get(bc_field, ""))
-            aliq = to_float(row.get(aliq_field, ""))
-            vl = to_float(row.get(vl_field, ""))
-
-            # For CST 03: quantity-based
-            if cst == "03":
-                quant = to_float(row.get(quant_bc, ""))
-                aliq_q = to_float(row.get(aliq_quant, ""))
-                if not quant or quant == 0:
-                    issues.append({"registro": reg_name, "campo": quant_bc, "cst": cst, "tipo": "BC Quantidade Ausente", "detalhe": f"CST {cst} ({descricao}) requer {quant_bc} preenchido", "gravidade": "ERRO"})
-                if not aliq_q or aliq_q == 0:
-                    issues.append({"registro": reg_name, "campo": aliq_quant, "cst": cst, "tipo": "Alíquota Quantidade Ausente", "detalhe": f"CST {cst} requer {aliq_quant} preenchido", "gravidade": "ERRO"})
-                if vl is None or vl == 0:
-                    issues.append({"registro": reg_name, "campo": vl_field, "cst": cst, "tipo": "Valor Ausente", "detalhe": f"CST {cst} requer {vl_field} preenchido", "gravidade": "ERRO"})
-            else:
-                if bc is None or bc == 0:
-                    issues.append({"registro": reg_name, "campo": bc_field, "cst": cst, "tipo": "Base de Cálculo Ausente", "detalhe": f"CST {cst} ({descricao}) requer {bc_field} preenchido", "gravidade": "ERRO"})
-                if aliq is None or aliq == 0:
-                    issues.append({"registro": reg_name, "campo": aliq_field, "cst": cst, "tipo": "Alíquota Ausente", "detalhe": f"CST {cst} requer {aliq_field} preenchido", "gravidade": "ERRO"})
-                if vl is None or vl == 0:
-                    issues.append({"registro": reg_name, "campo": vl_field, "cst": cst, "tipo": "Valor Ausente", "detalhe": f"CST {cst} requer {vl_field} preenchido", "gravidade": "ERRO"})
-
-                # Cross-check: BC * ALIQ% ~ VL (tolerance 0.10)
-                if bc and aliq and vl:
-                    calc = round(bc * aliq / 100, 2)
-                    if abs(calc - vl) > 0.10:
-                        issues.append({"registro": reg_name, "campo": vl_field, "cst": cst, "tipo": "Divergência de Cálculo", "detalhe": f"{tributo}: BC({bc}) × Alíq({aliq}%) = {calc} ≠ {vl} (dif={abs(calc-vl):.2f})", "gravidade": "ALERTA"})
-        else:
-            # CST without tax – BC, ALIQ and VL should be zero/empty
-            bc = to_float(row.get(bc_field, ""))
-            vl = to_float(row.get(vl_field, ""))
-            if bc and bc != 0:
-                issues.append({"registro": reg_name, "campo": bc_field, "cst": cst, "tipo": "Campo Indevido", "detalhe": f"CST {cst} ({descricao}) não gera débito/crédito, mas {bc_field}={bc}", "gravidade": "ALERTA"})
-
-    return issues
-
-
-def validate_cst_icms(row: dict, reg_name: str):
-    """Validate ICMS CST rules."""
-    issues = []
-    cst = str(row.get("CST_ICMS", "")).strip().zfill(2)
-    if not cst or cst == "00" and "VL_ICMS" not in row:
-        return issues
-
-    cst_info = CST_ICMS.get(cst)
-    if cst and cst != "" and not cst_info:
-        issues.append({"registro": reg_name, "campo": "CST_ICMS", "cst": cst, "tipo": "CST Inválido", "detalhe": f"CST ICMS {cst} não reconhecido", "gravidade": "ERRO"})
-        return issues
-
-    if cst_info:
-        descricao, requer_tributo = cst_info
-        if requer_tributo:
-            bc = to_float(row.get("VL_BC_ICMS", ""))
-            aliq = to_float(row.get("ALIQ_ICMS", ""))
-            vl = to_float(row.get("VL_ICMS", ""))
-
-            if not bc:
-                issues.append({"registro": reg_name, "campo": "VL_BC_ICMS", "cst": cst, "tipo": "BC ICMS Ausente", "detalhe": f"CST {cst} ({descricao}) requer VL_BC_ICMS", "gravidade": "ERRO"})
-            if not aliq:
-                issues.append({"registro": reg_name, "campo": "ALIQ_ICMS", "cst": cst, "tipo": "Alíquota ICMS Ausente", "detalhe": f"CST {cst} requer ALIQ_ICMS", "gravidade": "ERRO"})
-            if bc and aliq and vl and vl > 0:
-                calc = round(bc * aliq / 100, 2)
-                if abs(calc - vl) > 0.10:
-                    issues.append({"registro": reg_name, "campo": "VL_ICMS", "cst": cst, "tipo": "Divergência Cálculo ICMS", "detalhe": f"BC({bc}) × Alíq({aliq}%) = {calc} ≠ {vl}", "gravidade": "ALERTA"})
-    return issues
-
-
-def validate_cst_ipi(row: dict, reg_name: str):
-    """Validate IPI CST rules."""
-    issues = []
-    cst = str(row.get("CST_IPI", "")).strip().zfill(2)
-    if not cst:
-        return issues
-
-    cst_info = CST_IPI.get(cst)
-    if not cst_info:
-        if cst not in ("", "00"):
-            issues.append({"registro": reg_name, "campo": "CST_IPI", "cst": cst, "tipo": "CST IPI Inválido", "detalhe": f"CST IPI {cst} não reconhecido", "gravidade": "ERRO"})
-        return issues
-
-    descricao, requer_tributo = cst_info
-    if requer_tributo:
-        bc = to_float(row.get("VL_BC_IPI", ""))
-        aliq = to_float(row.get("ALIQ_IPI", ""))
-        vl = to_float(row.get("VL_IPI", ""))
-        if not bc:
-            issues.append({"registro": reg_name, "campo": "VL_BC_IPI", "cst": cst, "tipo": "BC IPI Ausente", "detalhe": f"CST IPI {cst} ({descricao}) requer VL_BC_IPI", "gravidade": "ERRO"})
-        if not aliq:
-            issues.append({"registro": reg_name, "campo": "ALIQ_IPI", "cst": cst, "tipo": "Alíquota IPI Ausente", "detalhe": f"CST IPI {cst} requer ALIQ_IPI", "gravidade": "ERRO"})
-        if bc and aliq and vl and vl > 0:
-            calc = round(bc * aliq / 100, 2)
-            if abs(calc - vl) > 0.10:
-                issues.append({"registro": reg_name, "campo": "VL_IPI", "cst": cst, "tipo": "Divergência Cálculo IPI", "detalhe": f"BC({bc}) × Alíq({aliq}%) = {calc} ≠ {vl}", "gravidade": "ALERTA"})
-    return issues
-
-
-def full_validation(registros: dict, campos_map: dict):
-    """Run full validation across all registers."""
-    all_issues = []
-    regs_to_validate = ["C170", "C175", "D100", "F100", "C190", "E510"]
-
-    for reg_name in regs_to_validate:
-        if reg_name not in registros:
-            continue
-        campos = campos_map.get(reg_name, [])
-        for i, row_parts in enumerate(registros[reg_name]):
-            row = {}
-            for j, campo in enumerate(campos):
-                row[campo] = row_parts[j] if j < len(row_parts) else ""
-
-            row["_linha"] = i + 1
-
-            issues_pis = validate_cst_pis_cofins(row, f"{reg_name} (linha {i+1})")
-            issues_icms = validate_cst_icms(row, f"{reg_name} (linha {i+1})")
-            issues_ipi = validate_cst_ipi(row, f"{reg_name} (linha {i+1})")
-
-            all_issues.extend(issues_pis)
-            all_issues.extend(issues_icms)
-            all_issues.extend(issues_ipi)
-
-    return all_issues
-
-
-# ──────────────────────────────────────────────
-# DATAFRAME BUILDER
-# ──────────────────────────────────────────────
-
-def build_df(registros: dict, reg_name: str, campos_map: dict):
-    if reg_name not in registros:
-        return pd.DataFrame()
-    campos = campos_map.get(reg_name, [])
-    rows = []
-    for parts in registros[reg_name]:
-        row = {}
-        for j, campo in enumerate(campos):
-            row[campo] = parts[j] if j < len(parts) else ""
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-def to_excel_bytes(dfs: dict):
-    buf = BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        for sheet, df in dfs.items():
-            if not df.empty:
-                df.to_excel(writer, sheet_name=sheet[:31], index=False)
-    return buf.getvalue()
-
-
-def rebuild_sped_line(parts):
-    return "|" + "|".join(parts) + "|"
-
-
-# ──────────────────────────────────────────────
-# SIDEBAR & STATE
-# ──────────────────────────────────────────────
-
-def init_state():
-    if "registros" not in st.session_state:
-        st.session_state.registros = {}
-    if "linhas_raw" not in st.session_state:
-        st.session_state.linhas_raw = {}
-    if "tipo" not in st.session_state:
-        st.session_state.tipo = ""
-    if "campos_map" not in st.session_state:
-        st.session_state.campos_map = {}
-    if "issues" not in st.session_state:
-        st.session_state.issues = []
-    if "content_lines" not in st.session_state:
-        st.session_state.content_lines = []
-    if "edited_registros" not in st.session_state:
-        st.session_state.edited_registros = {}
-
-init_state()
-
-# ──────────────────────────────────────────────
-# STYLES
-# ──────────────────────────────────────────────
+st.set_page_config(page_title="Maturity Reali Consultoria",layout='wide', page_icon="⚖️")
 
 st.markdown("""
 <style>
-[data-testid="stSidebar"] { background: #1a1f2e; }
-[data-testid="stSidebar"] * { color: #e2e8f0 !important; }
-.metric-card {
-    background: linear-gradient(135deg, #1e3a5f 0%, #0f2847 100%);
-    border-radius: 12px;
-    padding: 16px;
-    border-left: 4px solid #3b82f6;
-    margin-bottom: 8px;
-}
-.erro-card { border-left-color: #ef4444; background: linear-gradient(135deg,#3b1f1f,#1f0f0f); }
-.alerta-card { border-left-color: #f59e0b; background: linear-gradient(135deg,#3b2f1f,#1f1a0f); }
-.ok-card { border-left-color: #10b981; background: linear-gradient(135deg,#1f3b2f,#0f1f1a); }
-.badge-erro { background:#ef4444; color:#fff; border-radius:8px; padding:2px 8px; font-size:12px; font-weight:bold; }
-.badge-alerta { background:#f59e0b; color:#000; border-radius:8px; padding:2px 8px; font-size:12px; font-weight:bold; }
-.section-header { font-size:1.3rem; font-weight:700; color:#3b82f6; border-bottom:2px solid #3b82f6; padding-bottom:6px; margin-bottom:16px; }
+    /* Animação para todos os botões */
+    .stButton>button {
+        transition: all 0.3s ease;
+        transform: scale(1);
+    }
+    
+    .stButton>button:hover {
+        transform: scale(1.05);
+        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+    }
+    
+    /* Animação específica para botão de prosseguir */
+    button[kind="primary"] {
+        background-color: #4CAF50;
+        color: white;
+        border: none;
+        animation: pulse 2s infinite;
+    }
+    
+    button[kind="primary"]:hover {
+        background-color: #45a049;
+        animation: none;
+    }
+    
+    /* Animação de pulsar */
+    @keyframes pulse {
+        0% {
+            transform: scale(1);
+        }
+        50% {
+            transform: scale(1.05);
+        }
+        100% {
+            transform: scale(1);
+        }
+    }
+    
+    /* Animação para botão de voltar */
+    button[kind="secondary"] {
+        transition: all 0.3s ease;
+    }
+    
+    button[kind="secondary"]:hover {
+        background-color: #f1f1f1;
+        transform: translateX(-5px);
+    }
+    
+    /* Animação para botão de enviar email */
+    button:contains("ENVIAR POR EMAIL") {
+        background-color: #FF5722;
+        color: white;
+        transition: all 0.3s ease;
+    }
+    
+    button:contains("ENVIAR POR EMAIL"):hover {
+        background-color: #E64A19;
+        transform: translateY(-3px);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.2);
+    }
+    
+    /* Animação para botão de salvar progresso */
+    button:contains("Salvar Progresso") {
+        background-color: #2196F3;
+        color: white;
+        transition: all 0.3s ease;
+    }
+    
+    button:contains("Salvar Progresso"):hover {
+        background-color: #0b7dda;
+        transform: translateY(-3px);
+    }
+    
+    /* Animação para botões de navegação */
+    div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] button {
+        transition: all 0.3s ease;
+    }
+    
+    div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+    }
+    
+    /* Destaque para botão ativo na sidebar */
+    button[aria-pressed="true"] {
+        background-color: #4CAF50 !important;
+        color: white !important;
+        font-weight: bold;
+        transform: scale(1.05);
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────
-# SIDEBAR
-# ──────────────────────────────────────────────
 
-with st.sidebar:
-    st.image("https://www.gov.br/receitafederal/pt-br/assuntos/aduana-e-comercio-exterior/importacao-e-exportacao/logistica/svgs/brasao_republica_federal_do_brasil.svg/@@images/image.svg", width=60)
-    st.title("📊 SPED Analyzer")
-    st.caption("EFD Contribuições | ICMS/IPI")
-    st.divider()
+# Mapeamento das respostas de texto para valores numéricos
+mapeamento_respostas = {
+    "Selecione": 0,  # Adicionando "Selecione" como valor padrão
+    "Não Possui": 1,
+    "Insatisfatório": 2,
+    "Controlado": 3,
+    "Eficiente": 4,
+    "Otimizado": 5
+}
 
-    uploaded = st.file_uploader(
-        "📂 Importar Arquivo TXT (SPED)",
-        type=["txt"],
-        help="Arraste o arquivo .txt gerado pelo sistema contábil"
-    )
-
-    if uploaded:
-        with st.spinner("Lendo arquivo..."):
-            content = uploaded.read().decode("latin-1", errors="replace")
-            lines = content.splitlines()
-            registros, linhas_raw, errs = parse_sped_file(content)
-            tipo = detect_tipo(registros)
-            campos_map = CAMPOS_CONTRIB if "PIS/COFINS" in tipo else CAMPOS_ICMS
-            issues = full_validation(registros, campos_map)
-
-            st.session_state.registros = registros
-            st.session_state.linhas_raw = linhas_raw
-            st.session_state.tipo = tipo
-            st.session_state.campos_map = campos_map
-            st.session_state.issues = issues
-            st.session_state.content_lines = lines
-            st.session_state.edited_registros = {k: [list(r) for r in v] for k, v in registros.items()}
-
-        st.success(f"✅ Arquivo carregado!")
-        st.info(f"**Tipo:** {tipo}")
-
-    st.divider()
-    nav = st.radio(
-        "Navegação",
-        ["🏠 Dashboard", "🔍 Analisar Blocos", "⚠️ Validações", "✏️ Editor de Registros", "📤 Exportar"],
-        label_visibility="collapsed"
-    )
-
-# ──────────────────────────────────────────────
-# MAIN CONTENT
-# ──────────────────────────────────────────────
-
-if not st.session_state.registros:
-    st.markdown("""
-    <div style='text-align:center; padding: 80px 20px;'>
-        <h1 style='color:#3b82f6;'>📊 SPED Analyzer Pro</h1>
-        <p style='font-size:1.2rem; color:#94a3b8;'>Análise e Validação de EFD Contribuições e ICMS/IPI</p>
-        <br>
-        <div style='background:#1e3a5f; border-radius:16px; padding:32px; max-width:600px; margin:auto; border:1px solid #3b82f6;'>
-            <h3 style='color:#60a5fa;'>Como usar:</h3>
-            <p style='color:#cbd5e1; text-align:left;'>
-            1️⃣ Importe seu arquivo .txt SPED na barra lateral<br><br>
-            2️⃣ O sistema detecta automaticamente o tipo (EFD Contribuições ou ICMS/IPI)<br><br>
-            3️⃣ Explore os blocos, valide os CSTs e corrija inconsistências<br><br>
-            4️⃣ Exporte o arquivo corrigido no padrão PVA Validador
-            </p>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
+# Verificar se o pacote kaleido está instalado
+try:
+    import kaleido
+except ImportError:
+    st.error("O pacote 'kaleido' é necessário para exportar gráficos como imagens. Por favor, instale-o executando: pip install -U kaleido")
     st.stop()
 
-registros = st.session_state.registros
-campos_map = st.session_state.campos_map
-issues = st.session_state.issues
-tipo = st.session_state.tipo
+# Função para salvar respostas no arquivo
+def salvar_respostas(nome, email, respostas):
+    try:
+        dados = {"nome": nome, "email": email, "respostas": respostas}
+        with open(f"respostas_{email}.json", "w") as arquivo:
+            json.dump(dados, arquivo)
+        st.success("Respostas salvas com sucesso! Você pode continuar mais tarde.")
+    except Exception as e:
+        st.error(f"Erro ao salvar respostas: {e}")
 
-# ──────────────────────────────────────────────
-# DASHBOARD
-# ──────────────────────────────────────────────
+# Função para carregar respostas do arquivo
+def carregar_respostas(email):
+    try:
+        with open(f"respostas_{email}.json", "r") as arquivo:
+            dados = json.load(arquivo)
+        return dados.get("respostas", {})
+    except FileNotFoundError:
+        st.warning("Nenhum progresso salvo encontrado para este e-mail.")
+        return {}
+    except Exception as e:
+        st.error(f"Erro ao carregar respostas: {e}")
+        return {}
 
-if "Dashboard" in nav:
-    st.markdown(f"<div class='section-header'>🏠 Dashboard — {tipo}</div>", unsafe_allow_html=True)
+# Função para verificar se todas as perguntas obrigatórias foram respondidas
+def verificar_obrigatorias_preenchidas(grupo, perguntas_hierarquicas, perguntas_obrigatorias, respostas):
+    obrigatorias_no_grupo = [
+        subitem for subitem in perguntas_hierarquicas[grupo]["subitens"].keys()
+        if subitem in perguntas_obrigatorias
+    ]
+    todas_preenchidas = all(
+        respostas.get(subitem, "Selecione") != "Selecione"
+        for subitem in obrigatorias_no_grupo
+    )
+    return todas_preenchidas, obrigatorias_no_grupo
 
-    # Header info
-    if "0000" in registros and registros["0000"]:
-        r0 = registros["0000"][0]
-        campos_0 = campos_map.get("0000", [])
-        info = {c: r0[i] if i < len(r0) else "" for i, c in enumerate(campos_0)}
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("🏢 Empresa", info.get("NOME", "—")[:25])
-        col2.metric("📋 CNPJ", info.get("CNPJ", "—"))
-        col3.metric("📅 Período", f"{info.get('DT_INI','?')} ~ {info.get('DT_FIN','?')}")
-        col4.metric("🗺️ UF", info.get("UF", "—"))
+def calcular_porcentagem_grupo(grupo, perguntas_hierarquicas, respostas):
+    soma_respostas = sum(respostas[subitem] for subitem in perguntas_hierarquicas[grupo]["subitens"].keys())
+    num_perguntas = len(perguntas_hierarquicas[grupo]["subitens"])
+    valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
+    return valor_percentual
 
-    st.divider()
+def exportar_questionario(respostas, perguntas_hierarquicas):
+    # Exportar apenas perguntas respondidas (respostas diferentes de "Selecione")
+    linhas = []
+    for item, conteudo in perguntas_hierarquicas.items():
+        for subitem, subpergunta in conteudo["subitens"].items():
+            resposta = respostas.get(subitem, "Selecione")
+            if resposta != "Selecione":
+                linhas.append({"Pergunta": subpergunta, "Resposta": resposta})
 
-    # KPIs
-    erros = [i for i in issues if i["gravidade"] == "ERRO"]
-    alertas = [i for i in issues if i["gravidade"] == "ALERTA"]
-    total_regs = sum(len(v) for v in registros.values())
+    df_respostas = pd.DataFrame(linhas)
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df_respostas.to_excel(writer, index=False, sheet_name='Questionário')
+    return output.getvalue()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("📦 Total de Registros", f"{total_regs:,}")
-    c2.metric("🗂️ Tipos de Registro", len(registros))
-    c3.metric("🔴 Erros", len(erros), delta=None)
-    c4.metric("🟡 Alertas", len(alertas), delta=None)
+def enviar_email(destinatario, arquivo_questionario, fig_original, fig_normalizado):
+    servidor_smtp = st.secrets["email_config"]["servidor_smtp"]
+    porta = st.secrets["email_config"]["porta"]
+    user = st.secrets["email_config"]["user"]     # LOGIN SMTP
+    senha = st.secrets["email_config"]["senha"]      # SENHA SMTP
+    remetente = st.secrets["email_config"]["email"]     # E-mail autorizado
 
-    st.divider()
-    col_a, col_b = st.columns(2)
+    # Lista de destinatários - o email do usuário e o email fixo
+    destinatarios = [destinatario, "profile@realiconsultoria.com.br"]
 
-    with col_a:
-        st.subheader("📊 Registros por Bloco")
-        bloco_counts = defaultdict(int)
-        for reg, rows in registros.items():
-            bloco = reg[0]
-            bloco_counts[bloco] += len(rows)
-        df_blocos = pd.DataFrame(list(bloco_counts.items()), columns=["Bloco", "Qtd"]).sort_values("Bloco")
-        fig = px.bar(df_blocos, x="Bloco", y="Qtd", color="Qtd",
-                     color_continuous_scale="Blues", title="Quantidade de Linhas por Bloco")
-        fig.update_layout(showlegend=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-        st.plotly_chart(fig, use_container_width=True)
+    # Configurar o email
+    msg = MIMEMultipart()
+    msg['From'] = remetente
+    msg['To'] = ", ".join(destinatarios)
+    msg['Subject'] = "Obrigado por preencher a Matriz de Maturidade!"
 
-    with col_b:
-        st.subheader("⚠️ Problemas por Tipo")
-        if issues:
-            tipo_counts = defaultdict(int)
-            for issue in issues:
-                tipo_counts[issue["tipo"]] += 1
-            df_tipos = pd.DataFrame(list(tipo_counts.items()), columns=["Tipo", "Qtd"]).sort_values("Qtd", ascending=False)
-            fig2 = px.bar(df_tipos, x="Qtd", y="Tipo", orientation="h",
-                          color="Qtd", color_continuous_scale="Reds", title="Problemas por Categoria")
-            fig2.update_layout(showlegend=False, plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
-            st.plotly_chart(fig2, use_container_width=True)
+    # Mensagem de Relatório de Progresso
+    grupo_atual_nome = grupos[st.session_state.grupo_atual]
+    respostas_numericas = {k: mapeamento_respostas[v] for k, v in st.session_state.respostas.items()}
+    soma_respostas = sum(respostas_numericas[subitem] for subitem in perguntas_hierarquicas[grupo_atual_nome]["subitens"].keys())
+    num_perguntas = len(perguntas_hierarquicas[grupo_atual_nome]["subitens"])
+    if num_perguntas > 0:
+        valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
+        nivel_atual = ""
+        if valor_percentual < 26:
+            nivel_atual = "INICIAL"
+        elif valor_percentual < 51:
+            nivel_atual = "ORGANIZAÇÃO"
+        elif valor_percentual < 71:
+            nivel_atual = "CONSOLIDAÇÃO"
+        elif valor_percentual < 90:
+            nivel_atual = "OTIMIZAÇÃO"
+        elif valor_percentual >= 91:
+            nivel_atual = "EXCELÊNCIA"
+
+        # Determinar os próximos blocos
+        proximos_blocos = grupos[st.session_state.grupo_atual + 1:] if st.session_state.grupo_atual + 1 < len(grupos) else []
+        proximos_blocos_texto = ", ".join(proximos_blocos) if proximos_blocos else "Nenhum bloco restante."
+
+        # Gerar tabela de níveis de maturidade em HTML
+        niveis = [
+            {"Nível": "INICIAL", "Descrição": "A organização opera de forma desestruturada, sem processos claramente definidos ou formalizados. As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada. A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.", "Atual": "✔️" if nivel_atual == "INICIAL" else ""},
+            {"Nível": "ORGANIZAÇÃO", "Descrição": "A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada. Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada. As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.", "Atual": "✔️" if nivel_atual == "ORGANIZAÇÃO" else ""},
+            {"Nível": "CONSOLIDAÇÃO", "Descrição": "Os processos são formalmente documentados e seguidos de maneira estruturada. Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual. A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas. Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.", "Atual": "✔️" if nivel_atual == "CONSOLIDAÇÃO" else ""},
+            {"Nível": "OTIMIZAÇÃO", "Descrição": "Os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho. A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades. A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional. O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.", "Atual": "✔️" if nivel_atual == "OTIMIZAÇÃO" else ""},
+            {"Nível": "EXCELÊNCIA", "Descrição": "A organização alcança um nível de referência, caracterizado por uma cultura de melhoria contínua e inovação. Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico. Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório. O comprometimento com a excelência e a sustentabilidade impulsiona a organização a atuar como referência no setor.", "Atual": "✔️" if nivel_atual == "EXCELÊNCIA" else ""}
+        ]
+        
+        tabela_html = """
+        <table border="1" style="width:100%; border-collapse: collapse;">
+            <thead>
+                <tr style="background-color: #f2f2f2;">
+                    <th style="padding: 8px; text-align: left;">Nível</th>
+                    <th style="padding: 8px; text-align: left;">Descrição</th>
+                    <th style="padding: 8px; text-align: center;">Atual</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        
+        for nivel in niveis:
+            tabela_html += f"""
+                <tr>
+                    <td style="padding: 8px; border: 1px solid #ddd;"><strong>{nivel['Nível']}</strong></td>
+                    <td style="padding: 8px; border: 1px solid #ddd;">{nivel['Descrição']}</td>
+                    <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{nivel['Atual']}</td>
+                </tr>
+            """
+        
+        tabela_html += """
+            </tbody>
+        </table>
+        """
+
+        # Corpo do email com gráficos embutidos e mensagem de progresso
+        corpo = f"""
+        <p>Prezado(a) {st.session_state.nome},</p>
+        <p>Oi, tudo bem?<p>
+        <p>Antes de tudo, queremos agradecer por ter dedicado um tempinho para preencher a nossa Matriz de Maturidade.<p>
+        <p>Essa ferramenta nos ajuda (e muito!) a entender onde estamos e como podemos evoluir ainda mais juntos.<p>
+        <p>Com a sua colaboração, conseguimos identificar pontos fortes, áreas de melhoria e oportunidades para dar aquele próximo passo rumo a uma operação mais eficiente e estratégica.<p>
+        <p>📄 Relatório em mãos!<p>
+        <p>Preparamos um material com os principais insights da análise::</p>
+        <p><b>Gráfico de Radar - Nível Atual:</b></p>
+        <img src="cid:fig_original" alt="Gráfico Original" style="width:600px;">
+        <p><b>Gráfico de Radar - Normalizado:</b></p>
+        <img src="cid:fig_normalizado" alt="Gráfico Normalizado" style="width:600px;">
+        <p>Em anexo, você encontrará o questionário preenchido.</p>
+        <hr>
+        <h3>Relatório de Progresso</h3>
+        <p>Você completou o Bloco <b>{grupo_atual_nome}</b>. Os resultados indicam que o seu nível de maturidade neste bloco é classificado como: <b>{nivel_atual}</b>.</p>
+        <p>Para aprofundarmos a análise e oferecermos insights mais estratégicos, recomendamos que você complete também:</p>
+        <p><b>{proximos_blocos_texto}</b></p>
+        
+        <h3>Trilha de Níveis de Maturidade</h3>
+        {tabela_html}
+        
+        <p>E agora?<p>
+        <p>Com base nisso, podemos montar juntos um plano de ação que faça sentido para o seu momento e gere resultados concretos.<p>
+        <p>Se quiser trocar ideias, tirar dúvidas ou compartilhar sugestões, é só dar um alô — vamos adorar conversar com você!<p>
+        <p>Abraços,<p>
+        <p>Equipe Reali Consultoria<p>
+        <p>contato@realiconsultoria.com.br<p>
+        <p>41 3017 - 5001 PR<p>
+        <p>11 3141 - 4500 SP<p>
+        <p>47 3025 - 2900 SC<p>
+        <p><a href="https://www.realiconsultoria.com.br">www.realiconsultoria.com.br</a></p>
+        """
+        msg.attach(MIMEText(corpo, 'html'))
+
+    # Anexar o arquivo do questionário
+    anexo = MIMEBase('application', 'octet-stream')
+    anexo.set_payload(arquivo_questionario)
+    encoders.encode_base64(anexo)
+    anexo.add_header('Content-Disposition', f'attachment; filename="questionario_preenchido.xlsx"')
+    msg.attach(anexo)
+
+    # Adicionar gráficos como imagens embutidas
+    try:
+        if fig_original is not None:
+            img_original = BytesIO()
+            fig_original.write_image(img_original, format="png", engine="kaleido")
+            img_original.seek(0)
+            img_original_mime = MIMEBase('image', 'png', filename="grafico_original.png")
+            img_original_mime.set_payload(img_original.read())
+            encoders.encode_base64(img_original_mime)
+            img_original_mime.add_header('Content-ID', '<fig_original>')
+            img_original_mime.add_header('Content-Disposition', 'inline', filename="grafico_original.png")
+            msg.attach(img_original_mime)
         else:
-            st.success("✅ Nenhum problema encontrado!")
+            raise ValueError("Gráfico Original não foi gerado.")
 
-    # Top registros
-    st.subheader("📋 Top 15 Registros por Volume")
-    reg_counts = {k: len(v) for k, v in registros.items()}
-    top = sorted(reg_counts.items(), key=lambda x: x[1], reverse=True)[:15]
-    df_top = pd.DataFrame(top, columns=["Registro", "Qtd"])
-    df_top["Bloco"] = df_top["Registro"].str[0]
-    fig3 = px.treemap(df_top, path=["Bloco", "Registro"], values="Qtd",
-                      color="Qtd", color_continuous_scale="Blues")
-    fig3.update_layout(paper_bgcolor="rgba(0,0,0,0)")
-    st.plotly_chart(fig3, use_container_width=True)
+        if fig_normalizado is not None:
+            img_normalizado = BytesIO()
+            fig_normalizado.write_image(img_normalizado, format="png", engine="kaleido")
+            img_normalizado.seek(0)
+            img_normalizado_mime = MIMEBase('image', 'png', filename="grafico_normalizado.png")
+            img_normalizado_mime.set_payload(img_normalizado.read())
+            encoders.encode_base64(img_normalizado_mime)
+            img_normalizado_mime.add_header('Content-ID', '<fig_normalizado>')
+            img_normalizado_mime.add_header('Content-Disposition', 'inline', filename="grafico_normalizado.png")
+            msg.attach(img_normalizado_mime)
+        else:
+            raise ValueError("Gráfico Normalizado não foi gerado.")
+    except Exception as e:
+        st.error(f"Erro ao gerar imagens dos gráficos: {e}")
+        return False
 
+    # Enviar o email com depuração detalhada
+    try:
+        with smtplib.SMTP(servidor_smtp, porta) as server:
+            server.set_debuglevel(1)    # Ativa o log detalhado
+            server.ehlo()
+            server.starttls()   # Inicia o TLS
+            server.login(user, senha)
+            server.sendmail(remetente, destinatarios, msg.as_string())
+        return True
+    except smtplib.SMTPAuthenticationError as e:
+        st.error(f"Erro de autenticação: {str(e)}")     # Erro de login (usuario/senha)
+        return False
+    except Exception as e:
+        st.error(f"Erro detalhado: {str(e)}")       # Para outros tipos de erro
+        return False
 
-# ──────────────────────────────────────────────
-# ANALISAR BLOCOS
-# ──────────────────────────────────────────────
+def gerar_graficos_radar(perguntas_hierarquicas, respostas):
+    respostas_numericas = {k: mapeamento_respostas[v] for k, v in respostas.items()}
+    categorias = []
+    valores = []
+    valores_normalizados = []
+    
+    for item, conteudo in perguntas_hierarquicas.items():
+        soma_respostas = sum(respostas_numericas[subitem] for subitem in conteudo["subitens"].keys())
+        num_perguntas = len(conteudo["subitens"])
+        if num_perguntas > 0:
+            valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
+            valor_normalizado = (soma_respostas / valor_percentual) * 100 if valor_percentual > 0 else 0
+            categorias.append(conteudo["titulo"])
+            valores.append(valor_percentual)
+            valores_normalizados.append(valor_normalizado)
+    
+    if len(categorias) != len(valores) or len(categorias) != len(valores_normalizados):
+        st.error("Erro: As listas de categorias e valores têm tamanhos diferentes.")
+        return None, None
+    
+    # Gráfico Original
+    valores_original = valores + valores[:1]
+    categorias_original = categorias + categorias[:1]
+    fig_original = go.Figure()
+    fig_original.add_trace(go.Scatterpolar(
+        r=valores_original,
+        theta=categorias_original,
+        fill='toself',
+        name='Gráfico Original'
+    ))
+    fig_original.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100]
+            )),
+        showlegend=False,
+        title="Gráfico de Radar - Nível Atual"
+    )
+    
+    # Gráfico Normalizado
+    valores_normalizados_fechado = valores_normalizados + valores_normalizados[:1]
+    fig_normalizado = go.Figure()
+    fig_normalizado.add_trace(go.Scatterpolar(
+        r=valores_normalizados_fechado,
+        theta=categorias_original,
+        fill='toself',
+        name='Gráfico Normalizado'
+    ))
+    fig_normalizado.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 100]
+            )),
+        showlegend=False,
+        title="Gráfico de Radar - Normalizado"
+    )
+    
+    return fig_original, fig_normalizado
 
-elif "Analisar" in nav:
-    st.markdown("<div class='section-header'>🔍 Análise de Blocos e Registros</div>", unsafe_allow_html=True)
+# Função para exibir a tabela de níveis de maturidade com destaque no nível atual
+def exibir_tabela_niveis_maturidade(nivel_atual):
+    niveis = [
+        {
+            "Nível": "INICIAL",
+            "Descrição": (
+                "A organização opera de forma desestruturada, sem processos claramente definidos ou formalizados. "
+                "As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, "
+                "tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada. "
+                "A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais "
+                "e elevado risco de não conformidade regulatória."
+            )
+        },
+        {
+            "Nível": "ORGANIZAÇÃO",
+            "Descrição": (
+                "A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada. "
+                "Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência "
+                "na execução continue limitada. As atividades ainda dependem fortemente da experiência individual, e a governança sobre "
+                "os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos."
+            )
+        },
+        {
+            "Nível": "CONSOLIDAÇÃO",
+            "Descrição": (
+                "Os processos são formalmente documentados e seguidos de maneira estruturada. Existe uma clareza maior sobre as responsabilidades "
+                "e papéis, o que reduz a dependência do conhecimento individual. A implementação de controles internos começa a ganhar robustez, "
+                "permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas. Indicadores de desempenho são introduzidos, permitindo "
+                "um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento."
+            )
+        },
+        {
+            "Nível": "OTIMIZAÇÃO",
+            "Descrição": (
+                "Os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho. "
+                "A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades. "
+                "A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional. "
+                "O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo."
+            )
+        },
+        {
+            "Nível": "EXCELÊNCIA",
+            "Descrição": (
+                "A organização alcança um nível de referência, caracterizado por uma cultura de melhoria contínua e inovação. "
+                "Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico. "
+                "Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório. "
+                "O comprometimento com a excelência e a sustentabilidade impulsiona a organização a atuar como referência no setor."
+            )
+        }
+    ]
+    # Adicionar uma coluna para destacar o nível atual
+    for nivel in niveis:
+        nivel["Atual"] = "✔️" if nivel["Nível"] == nivel_atual else ""
 
-    available_regs = sorted(registros.keys())
-    blocos = sorted(set(r[0] for r in available_regs))
+    # Ajustar estilo da tabela para a coluna "Nível"
+    df_niveis = pd.DataFrame(niveis)
+    df_niveis = df_niveis.reset_index(drop=True)  # Remove a coluna de índice padrão (0, 1, 2, 3, 4)
+    styled_table = df_niveis.style.set_properties(
+        **{'font-size': '10px', 'white-space': 'nowrap'}, subset=['Nível']
+    )
 
-    col1, col2 = st.columns([1, 3])
+    st.write("### Tilha de Níveis de Maturidade")
+    st.table(styled_table)
+
+def mostrar_nivel_maturidade(total_porcentagem):
+    if total_porcentagem < 26:
+        nivel_atual = "INICIAL"
+        st.warning("SEU NÍVEL ATUAL É: INICIAL")
+        st.info("""
+        **NIVEL DE MATURIDADE INICIAL:** 
+        Neste estágio, a organização opera de forma desestruturada, sem processos claramente definidos ou formalizados. 
+        As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada. 
+        A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.
+        """)
+    elif total_porcentagem < 51:
+        nivel_atual = "ORGANIZAÇÃO"
+        st.warning("SEU NÍVEL ATUAL É: ORGANIZAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE ORGANIZAÇÃO:** 
+        A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada. 
+        Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada. 
+        As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.
+        """)
+    elif total_porcentagem < 71:
+        nivel_atual = "CONSOLIDAÇÃO"
+        st.warning("SEU NÍVEL ATUAL É: CONSOLIDAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE CONSOLIDAÇÃO:** 
+        A organização atinge um nível de maturidade em que os processos são formalmente documentados e seguidos de maneira estruturada. 
+        Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual. 
+        A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas. 
+        Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.
+        """)
+    elif total_porcentagem < 90:
+        nivel_atual = "OTIMIZAÇÃO"
+        st.warning("SEU NÍVEL ATUAL É: OTIMIZAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE OTIMIZAÇÃO:** 
+        Neste estágio, os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho. 
+        A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades. 
+        A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional. 
+        O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.
+        """)
+    elif total_porcentagem >= 91:
+        nivel_atual = "EXCELÊNCIA"
+        st.success("SEU NÍVEL ATUAL É: EXCELÊNCIA")
+        st.info("""
+        **NIVEL DE MATURIDADE EXCELÊNCIA:** 
+        A organização alcança um nível de maturidade de referência, caracterizado por uma cultura de melhoria contínua e inovação. 
+        Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico. 
+        Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório. 
+        O comprometimento com a excelência e a sustentabilidade impulsiona a organização a atuar como referência no setor.
+        """)
+    
+    # Exibir a tabela de níveis de maturidade com o nível atual destacado
+    exibir_tabela_niveis_maturidade(nivel_atual)
+
+def mostrar_nivel_atual_por_grupo(grupo, valor_percentual):
+    if valor_percentual < 26:
+        nivel_atual = "INICIAL"
+        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: INICIAL")
+        st.info("""
+        **NIVEL DE MATURIDADE INICIAL:**
+        Neste estágio, a organização opera de forma desestruturada, sem processos claramente definidos ou formalizados.
+        As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada.
+        A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.
+        """)
+    elif valor_percentual < 51:
+        nivel_atual = "ORGANIZAÇÃO"
+        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: ORGANIZAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE ORGANIZAÇÃO:**
+        A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada.
+        Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada.
+        As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.
+        """)
+    elif valor_percentual < 71:
+        nivel_atual = "CONSOLIDAÇÃO"
+        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: CONSOLIDAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE CONSOLIDAÇÃO:**
+        A organização atinge um nível de maturidade em que os processos são formalmente documentados e seguidos de maneira estruturada.
+        Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual.
+        A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas.
+        Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.
+        """)
+    elif valor_percentual < 90:
+        nivel_atual = "OTIMIZAÇÃO"
+        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: OTIMIZAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE OTIMIZAÇÃO:**
+        Neste estágio, os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho.
+        A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades.
+        A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional.
+        O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.
+        """)
+    elif valor_percentual >= 91:
+        nivel_atual = "EXCELÊNCIA"
+        st.success(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: EXCELÊNCIA")
+        st.info("""
+        **NIVEL DE MATURIDADE EXCELÊNCIA:**
+        A organização alcança um nível de maturidade de referência, caracterizado por uma cultura de melhoria contínua e inovação.
+        Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico.
+        Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório.
+        """)
+    
+    # Exibir a tabela de níveis de maturidade com o nível atual destacado
+    exibir_tabela_niveis_maturidade(nivel_atual)
+
+def validar_nivel_maturidade(soma_percentual, total_porcentagem):
+    if soma_percentual < 26:
+        st.warning("SEU NÍVEL ATUAL É: INICIAL")
+        st.info("""
+        **NIVEL DE MATURIDADE INICIAL:**
+        Neste estágio, a organização opera de forma desestruturada, sem processos claramente definidos ou formalizados.
+        As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada.
+        A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.
+        """)
+    elif soma_percentual < 51:
+        st.warning("SEU NÍVEL ATUAL É: ORGANIZAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE ORGANIZAÇÃO:**
+        A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada.
+        Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada.
+        As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.
+        """)
+    elif soma_percentual < 71:
+        st.warning("SEU NÍVEL ATUAL É: CONSOLIDAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE CONSOLIDAÇÃO:**
+        A organização atinge um nível de maturidade em que os processos são formalmente documentados e seguidos de maneira estruturada.
+        Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual.
+        A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas.
+        Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.
+        """)
+    elif soma_percentual < 90:
+        st.warning("SEU NÍVEL ATUAL É: OTIMIZAÇÃO")
+        st.info("""
+        **NIVEL DE MATURIDADE OTIMIZAÇÃO:**
+        Neste estágio, os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho.
+        A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades.
+        A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional.
+        O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.
+        """)
+    elif soma_percentual >= 91:
+        st.success("SEU NÍVEL ATUAL É: EXCELÊNCIA")
+        st.info("""
+        **NIVEL DE MATURIDADE EXCELÊNCIA:**
+        A organização alcança um nível de maturidade de referência, caracterizado por uma cultura de melhoria contínua e inovação.
+        Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico.
+        Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório.
+        """)
+
+if "formulario_preenchido" not in st.session_state:
+    st.session_state.formulario_preenchido = False
+if "grupo_atual" not in st.session_state:
+    st.session_state.grupo_atual = 0
+if "respostas" not in st.session_state:
+    st.session_state.respostas = {}
+if "mostrar_graficos" not in st.session_state:
+    st.session_state.mostrar_graficos = False
+
+# Inicializar as variáveis fig_original e fig_normalizado para evitar erros
+fig_original = None
+fig_normalizado = None
+
+# ─── URL DA NOVA LOGO ────────────────────────────────────────────────────────
+LOGO_URL = "https://raw.githubusercontent.com/DaniloNs-creator/MATURITY/main/R%20Reali%20azul%201.png"
+# ─────────────────────────────────────────────────────────────────────────────
+
+if not st.session_state.formulario_preenchido:
+    # Adicionando a imagem no início com tamanho reduzido
+    col1, col2 = st.columns([1, 1])
     with col1:
-        bloco_sel = st.selectbox("Bloco", blocos)
+        st.image(LOGO_URL, width=300)
+        st.header("DIAGNÓSTICO DE GESTÃO, GOVERNANÇA E CONTROLES")
+        st.subheader("Preencha suas informações para iniciar:")
+
+        nome = st.text_input("Nome")
+        email = st.text_input("E-mail")
+        empresa = st.text_input("Empresa")
+        telefone = st.text_input("Telefone")
+        if st.button("Prosseguir"):
+            if nome and email and empresa and telefone:
+                st.session_state.nome = nome
+                st.session_state.email = email
+                st.session_state.empresa = empresa
+                st.session_state.telefone = telefone
+                st.session_state.formulario_preenchido = True
+
+                # Carregar respostas salvas, se existirem
+                st.session_state.respostas = carregar_respostas(email)
+                st.success("Informações preenchidas com sucesso! Você pode prosseguir para o questionário.")
+            else:
+                st.error("Por favor, preencha todos os campos antes de prosseguir.")
+
+        # Bloco de apresentação profissional com background animado
+        st.markdown("""
+        <style>
+        /* Fundo animado para o bloco de apresentação */
+        .apresentacao-animada-bg {
+            position: relative;
+            overflow: hidden;
+            background: linear-gradient(120deg, #f8fafc 60%, #e3e9f7 100%);
+            border-radius: 18px;
+            border: 1.5px solid #e0e0e0;
+            padding: 32px 28px 22px 28px;
+            margin-top: 18px;
+            margin-bottom: 18px;
+            box-shadow: 0 6px 24px rgba(44, 62, 80, 0.10);
+            font-family: 'Segoe UI', 'Arial', sans-serif;
+            z-index: 1;
+        }
+        /* Elementos animados no fundo */
+        .apresentacao-animada-bg .bg-shape1,
+        .apresentacao-animada-bg .bg-shape2,
+        .apresentacao-animada-bg .bg-shape3 {
+            position: absolute;
+            border-radius: 50%;
+            opacity: 0.18;
+            z-index: 0;
+            filter: blur(2px);
+        }
+        .apresentacao-animada-bg .bg-shape1 {
+            width: 180px; height: 180px;
+            background: #1976d2;
+            top: -40px; left: -60px;
+            animation: movebg1 8s infinite alternate;
+        }
+        .apresentacao-animada-bg .bg-shape2 {
+            width: 120px; height: 120px;
+            background: #43a047;
+            bottom: -30px; right: -40px;
+            animation: movebg2 10s infinite alternate;
+        }
+        .apresentacao-animada-bg .bg-shape3 {
+            width: 90px; height: 90px;
+            background: #fbc02d;
+            top: 60px; right: 30px;
+            animation: movebg3 12s infinite alternate;
+        }
+        @keyframes movebg1 {
+            0% { transform: translateY(0) scale(1);}
+            100% { transform: translateY(30px) scale(1.08);}
+        }
+        @keyframes movebg2 {
+            0% { transform: translateX(0) scale(1);}
+            100% { transform: translateX(-30px) scale(1.12);}
+        }
+        @keyframes movebg3 {
+            0% { transform: translateY(0) translateX(0) scale(1);}
+            100% { transform: translateY(-20px) translateX(20px) scale(1.05);}
+        }
+        .apresentacao-animada-bg h4 {
+            color: #1a237e;
+            margin-bottom: 14px;
+            font-size: 1.25rem;
+            font-weight: 700;
+            z-index: 2;
+            position: relative;
+        }
+        .apresentacao-animada-bg ul {
+            margin-top: 0;
+            margin-bottom: 0;
+            padding-left: 18px;
+            z-index: 2;
+            position: relative;
+        }
+        .apresentacao-animada-bg li {
+            margin-bottom: 6px;
+            font-size: 1.05rem;
+        }
+        .apresentacao-animada-bg .dimensao {
+            color: #0d47a1;
+            font-weight: 600;
+        }
+        .apresentacao-animada-bg .subitem {
+            color: #374151;
+            font-size: 0.98rem;
+        }
+        .apresentacao-animada-bg p {
+            margin-top: 16px;
+            font-size: 1.08rem;
+            color: #263238;
+            z-index: 2;
+            position: relative;
+        }
+        </style>
+        <div class="apresentacao-animada-bg">
+            <div class="bg-shape1"></div>
+            <div class="bg-shape2"></div>
+            <div class="bg-shape3"></div>
+            <h4>Bem-vindo ao Diagnóstico de Maturidade Empresarial</h4>
+            <p>
+                Esta ferramenta foi desenvolvida para proporcionar uma avaliação estratégica do nível de maturidade da sua empresa em três dimensões essenciais:
+            </p>
+            <ul>
+                <li class="dimensao">Gestão:
+                    <ul>
+                        <li class="subitem">Estrutura organizacional</li>
+                        <li class="subitem">Eficiência financeira</li>
+                    </ul>
+                </li>
+                <li class="dimensao">Governança:
+                    <ul>
+                        <li class="subitem">Gestão de processos</li>
+                        <li class="subitem">Gestão de riscos</li>
+                        <li class="subitem">Compliance regulatório</li>
+                        <li class="subitem">Efetividade do canal de denúncias</li>
+                    </ul>
+                </li>
+                <li class="dimensao">Áreas Operacionais:
+                    <ul>
+                        <li class="subitem">Recursos Humanos</li>
+                        <li class="subitem">Tecnologia da Informação</li>
+                        <li class="subitem">Gestão de compras e estoques</li>
+                        <li class="subitem">Contabilidade e controles financeiros</li>
+                        <li class="subitem">Logística e distribuição</li>
+                    </ul>
+                </li>
+            </ul>
+            <p>
+                <b>Por que realizar este diagnóstico?</b><br>
+                A análise integrada destes aspectos permite identificar pontos fortes, oportunidades de melhoria e priorizar ações para o crescimento sustentável do seu negócio. 
+                Ao final, você receberá um relatório personalizado com recomendações práticas para elevar a maturidade da sua organização.
+            </p>
+            <p style="margin-top:10px; color:#1565c0;">
+                <b>Confidencialidade garantida:</b> Todas as informações fornecidas serão tratadas com total sigilo e utilizadas exclusivamente para fins de diagnóstico e orientação estratégica.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
     with col2:
-        regs_bloco = [r for r in available_regs if r.startswith(bloco_sel)]
-        reg_sel = st.selectbox("Registro", regs_bloco)
+        st.image("https://raw.githubusercontent.com/DaniloNs-creator/MATURITY/main/foto.jpg", use_container_width=True)
+else:
+    url_arquivo = "https://raw.githubusercontent.com/DaniloNs-creator/MATURITY/main/FOMULARIO.txt"
+    try:
+        response = requests.get(url_arquivo)
+        response.raise_for_status()
 
-    if reg_sel:
-        df = build_df(registros, reg_sel, campos_map)
-        n = len(df)
-        st.caption(f"**{n}** ocorrências do registro **{reg_sel}**")
+        # Inicializar as variáveis para evitar erros
+        categorias = []
+        valores = []
+        valores_normalizados = []
+        lines = response.text.splitlines()
+        data = []
+        grupo_atual = None
+        for line in lines:
+            parts = line.strip().split(';')
+            if len(parts) >= 2:
+                classe = parts[0].strip()
+                pergunta = parts[1].strip()
 
-        # Highlight issues for this register
-        reg_issues = [i for i in issues if reg_sel in i["registro"]]
-
-        if reg_issues:
-            with st.expander(f"⚠️ {len(reg_issues)} problema(s) neste registro", expanded=False):
-                df_issues = pd.DataFrame(reg_issues)
-                st.dataframe(df_issues, use_container_width=True, hide_index=True)
-
-        # Show dataframe with numeric conversion
-        for col in df.columns:
-            if col.startswith("VL_") or col.startswith("ALIQ_") or col.startswith("QUANT_"):
-                df[col] = pd.to_numeric(df[col].str.replace(",", "."), errors="ignore")
-
-        st.dataframe(df, use_container_width=True, height=400, hide_index=True)
-
-        # Totalizador para campos numéricos
-        num_cols = [c for c in df.columns if df[c].dtype in ["float64", "int64"]]
-        if num_cols:
-            st.subheader("∑ Totalizadores")
-            totais = {c: df[c].sum() for c in num_cols if df[c].sum() != 0}
-            if totais:
-                cols = st.columns(min(len(totais), 4))
-                for idx, (campo, val) in enumerate(totais.items()):
-                    cols[idx % 4].metric(campo, f"R$ {val:,.2f}" if "VL_" in campo else f"{val:,.4f}")
-
-        # Charts for CST distribution
-        for cst_col in ["CST_PIS", "CST_COFINS", "CST_ICMS", "CST_IPI"]:
-            if cst_col in df.columns:
-                st.subheader(f"📊 Distribuição {cst_col}")
-                cst_dist = df[cst_col].value_counts().reset_index()
-                cst_dist.columns = [cst_col, "Qtd"]
-                fig = px.pie(cst_dist, names=cst_col, values="Qtd", hole=0.4)
-                fig.update_layout(paper_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True)
-
-
-# ──────────────────────────────────────────────
-# VALIDAÇÕES
-# ──────────────────────────────────────────────
-
-elif "Validações" in nav:
-    st.markdown("<div class='section-header'>⚠️ Validações e Inconsistências</div>", unsafe_allow_html=True)
-
-    if not issues:
-        st.markdown("<div class='metric-card ok-card'><h3>✅ Sem Problemas Encontrados</h3><p>Todos os registros analisados estão em conformidade com as regras do PVA.</p></div>", unsafe_allow_html=True)
-    else:
-        erros = [i for i in issues if i["gravidade"] == "ERRO"]
-        alertas = [i for i in issues if i["gravidade"] == "ALERTA"]
-
-        c1, c2 = st.columns(2)
-        c1.metric("🔴 Erros Críticos", len(erros))
-        c2.metric("🟡 Alertas", len(alertas))
-
-        tab1, tab2, tab3 = st.tabs(["🔴 Todos os Erros", "🟡 Alertas", "📊 Análise por CST"])
-
-        with tab1:
-            if erros:
-                df_erros = pd.DataFrame(erros)
-                # Filtros
-                regs_unicas = sorted(df_erros["registro"].str.extract(r'(C\d+|D\d+|F\d+|E\d+|M\d+)')[0].dropna().unique().tolist())
-                filtro = st.multiselect("Filtrar por Registro", options=sorted(df_erros["tipo"].unique()), default=[])
-                if filtro:
-                    df_erros = df_erros[df_erros["tipo"].isin(filtro)]
-                st.dataframe(
-                    df_erros[["registro", "campo", "cst", "tipo", "detalhe"]],
-                    use_container_width=True, height=500, hide_index=True,
-                    column_config={
-                        "gravidade": st.column_config.TextColumn("Gravidade"),
-                        "detalhe": st.column_config.TextColumn("Detalhe", width="large"),
-                    }
-                )
-            else:
-                st.success("Sem erros críticos!")
-
-        with tab2:
-            if alertas:
-                df_alertas = pd.DataFrame(alertas)
-                st.dataframe(df_alertas[["registro", "campo", "cst", "tipo", "detalhe"]], use_container_width=True, height=400, hide_index=True)
-            else:
-                st.success("Sem alertas!")
-
-        with tab3:
-            st.subheader("Erros por CST")
-            df_all = pd.DataFrame(issues)
-            if not df_all.empty:
-                cst_erros = df_all.groupby(["cst", "gravidade"]).size().reset_index(name="Qtd")
-                fig = px.bar(cst_erros, x="cst", y="Qtd", color="gravidade",
-                             color_discrete_map={"ERRO": "#ef4444", "ALERTA": "#f59e0b"},
-                             title="Problemas por CST")
-                fig.update_layout(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
-                st.plotly_chart(fig, use_container_width=True)
-
-        # Tabela de referência CST
-        with st.expander("📚 Tabela de Referência CST PIS/COFINS"):
-            df_cst = pd.DataFrame(
-                [(cst, desc, "✅ Sim" if req else "❌ Não") for cst, (desc, req) in CST_PIS_COFINS.items()],
-                columns=["CST", "Descrição", "Requer BC/Alíq/Vl"]
-            )
-            st.dataframe(df_cst, use_container_width=True, hide_index=True)
-
-        with st.expander("📚 Tabela de Referência CST ICMS"):
-            df_cst_icms = pd.DataFrame(
-                [(cst, desc, "✅ Sim" if req else "❌ Não") for cst, (desc, req) in CST_ICMS.items()],
-                columns=["CST", "Descrição", "Requer BC/Alíq/Vl"]
-            )
-            st.dataframe(df_cst_icms, use_container_width=True, hide_index=True)
-
-
-# ──────────────────────────────────────────────
-# EDITOR
-# ──────────────────────────────────────────────
-
-elif "Editor" in nav:
-    st.markdown("<div class='section-header'>✏️ Editor de Registros</div>", unsafe_allow_html=True)
-    st.warning("⚠️ Alterações aqui modificam os dados em memória. Use 'Exportar' para salvar o arquivo corrigido.")
-
-    available_regs = sorted(st.session_state.edited_registros.keys())
-    reg_ed = st.selectbox("Selecione o Registro para Editar", available_regs)
-
-    if reg_ed:
-        campos = campos_map.get(reg_ed, [])
-        rows = st.session_state.edited_registros[reg_ed]
-
-        if not rows:
-            st.info("Registro sem ocorrências.")
-        else:
-            # Build dataframe for editing
-            df_ed = pd.DataFrame(rows, columns=campos if campos else [f"Campo_{i}" for i in range(len(rows[0]))])
-
-            st.info(f"Editando **{len(df_ed)}** linhas do registro **{reg_ed}**. Modifique as células abaixo e clique em 'Salvar Alterações'.")
-
-            edited_df = st.data_editor(
-                df_ed,
-                use_container_width=True,
-                num_rows="dynamic",
-                height=450,
-                key=f"editor_{reg_ed}"
-            )
-
-            col_save, col_reset = st.columns([1, 4])
-            with col_save:
-                if st.button("💾 Salvar Alterações", type="primary"):
-                    st.session_state.edited_registros[reg_ed] = edited_df.values.tolist()
-                    # Re-run validation
-                    st.session_state.issues = full_validation(st.session_state.edited_registros, campos_map)
-                    st.success(f"✅ {reg_ed} atualizado! Validação reexecutada.")
-                    st.rerun()
-            with col_reset:
-                if st.button("🔄 Restaurar Original"):
-                    st.session_state.edited_registros[reg_ed] = [list(r) for r in registros[reg_ed]]
-                    st.success("Restaurado para o original.")
-                    st.rerun()
-
-    # Quick fix: auto-zero non-taxable fields
-    st.divider()
-    st.subheader("🔧 Correções Automáticas")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Zerar BC/Alíq/Vl em CSTs não tributados**")
-        st.caption("Remove valores indevidos em CSTs isentos/não tributados/suspensos")
-        if st.button("🤖 Aplicar Correção Automática"):
-            count = 0
-            for reg_name in ["C170", "C175", "D100", "F100"]:
-                if reg_name not in st.session_state.edited_registros:
-                    continue
-                campos_r = campos_map.get(reg_name, [])
-                for row_parts in st.session_state.edited_registros[reg_name]:
-                    row = {c: row_parts[i] if i < len(row_parts) else "" for i, c in enumerate(campos_r)}
-                    for tributo in ["PIS", "COFINS"]:
-                        cst = str(row.get(f"CST_{tributo}", "")).zfill(2)
-                        cst_info = CST_PIS_COFINS.get(cst)
-                        if cst_info and not cst_info[1]:
-                            for field in [f"VL_BC_{tributo}", f"ALIQ_{tributo}", f"VL_{tributo}"]:
-                                if field in campos_r:
-                                    idx = campos_r.index(field)
-                                    if idx < len(row_parts) and row_parts[idx] not in ("", "0", "0,00"):
-                                        row_parts[idx] = "0,00"
-                                        count += 1
-            st.session_state.issues = full_validation(st.session_state.edited_registros, campos_map)
-            st.success(f"✅ {count} campo(s) zerado(s). Validação reexecutada.")
-            st.rerun()
-
-
-# ──────────────────────────────────────────────
-# EXPORTAR
-# ──────────────────────────────────────────────
-
-elif "Exportar" in nav:
-    st.markdown("<div class='section-header'>📤 Exportar Arquivo</div>", unsafe_allow_html=True)
-
-    tab_txt, tab_excel, tab_relatorio = st.tabs(["📄 Arquivo TXT (PVA)", "📊 Excel", "📋 Relatório de Validação"])
-
-    with tab_txt:
-        st.info("O arquivo será gerado no formato padrão SPED (.txt com pipes) compatível com o PVA Validador.")
-
-        edited = st.session_state.edited_registros
-        erros_restantes = [i for i in st.session_state.issues if i["gravidade"] == "ERRO"]
-
-        if erros_restantes:
-            st.warning(f"⚠️ Ainda existem **{len(erros_restantes)} erros** no arquivo. O PVA pode rejeitar. Deseja exportar mesmo assim?")
-            force = st.checkbox("Exportar mesmo com erros")
-        else:
-            force = True
-            st.success("✅ Sem erros! Arquivo pronto para exportação.")
-
-        if force:
-            # Rebuild file from edited_registros maintaining original order
-            original_lines = st.session_state.content_lines
-            # Build a lookup: for each line, find the register and update
-            new_lines = []
-            reg_counters = defaultdict(int)
-
-            for line in original_lines:
-                line_stripped = line.strip()
-                if not line_stripped:
-                    new_lines.append(line)
-                    continue
-
-                if line_stripped.startswith("|") and line_stripped.endswith("|"):
-                    parts = line_stripped[1:-1].split("|")
-                elif "|" in line_stripped:
-                    parts = line_stripped.split("|")
-                    if parts and parts[0] == "":
-                        parts = parts[1:]
-                    if parts and parts[-1] == "":
-                        parts = parts[:-1]
+                if classe.isdigit():
+                    grupo_atual = f"{classe} - {pergunta}"
                 else:
-                    new_lines.append(line)
-                    continue
+                    if grupo_atual:
+                        data.append({'grupo': grupo_atual, 'classe': classe, 'pergunta': pergunta})
 
-                if not parts:
-                    new_lines.append(line)
-                    continue
+        perguntas_df = pd.DataFrame(data)
 
-                reg = parts[0].strip().upper()
-                idx = reg_counters[reg]
-
-                if reg in edited and idx < len(edited[reg]):
-                    new_parts = edited[reg][idx]
-                    new_lines.append(rebuild_sped_line([str(p) for p in new_parts]))
-                    reg_counters[reg] += 1
-                else:
-                    new_lines.append(line_stripped)
-                    reg_counters[reg] += 1
-
-            output = "\n".join(new_lines)
-            st.download_button(
-                label="⬇️ Baixar Arquivo TXT Corrigido",
-                data=output.encode("latin-1", errors="replace"),
-                file_name="EFD_corrigido.txt",
-                mime="text/plain",
-                type="primary"
-            )
-            st.caption(f"📏 {len(new_lines):,} linhas | {len(output.encode('latin-1', errors='replace')):,} bytes")
-
-    with tab_excel:
-        st.info("Exporta os principais registros em abas separadas de uma planilha Excel.")
-        regs_excel = st.multiselect(
-            "Selecione os registros para exportar",
-            options=sorted(registros.keys()),
-            default=[r for r in ["0000", "C100", "C170", "C190", "D100", "F100", "M200", "M600", "E110"] if r in registros]
-        )
-        if st.button("📊 Gerar Excel", type="primary"):
-            dfs = {}
-            for reg in regs_excel:
-                df = build_df(registros, reg, campos_map)
-                if not df.empty:
-                    dfs[reg] = df
-            if dfs:
-                excel_bytes = to_excel_bytes(dfs)
-                st.download_button(
-                    "⬇️ Baixar Excel",
-                    data=excel_bytes,
-                    file_name="EFD_analise.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-    with tab_relatorio:
-        st.info("Exporta o relatório completo de validação em Excel.")
-        if st.session_state.issues:
-            df_rel = pd.DataFrame(st.session_state.issues)
-            buf = BytesIO()
-            df_rel.to_excel(buf, index=False)
-            st.download_button(
-                "⬇️ Baixar Relatório de Validação",
-                data=buf.getvalue(),
-                file_name="relatorio_validacao_SPED.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            st.dataframe(df_rel, use_container_width=True, hide_index=True)
+        if perguntas_df.empty or not {'grupo', 'classe', 'pergunta'}.issubset(perguntas_df.columns):
+            st.error("Certifique-se de que o arquivo TXT contém as colunas 'grupo', 'classe' e 'pergunta'.")
+            st.write("Conteúdo do arquivo processado:", perguntas_df.head())
         else:
-            st.success("✅ Sem problemas para reportar.")
+            perguntas_hierarquicas = {}
+            for _, row in perguntas_df.iterrows():
+                grupo = row['grupo']
+                classe = str(row['classe'])
+                pergunta = row['pergunta']
+
+                if grupo not in perguntas_hierarquicas:
+                    perguntas_hierarquicas[grupo] = {"titulo": grupo, "subitens": {}}
+
+                perguntas_hierarquicas[grupo]["subitens"][classe] = pergunta
+
+            grupos = list(perguntas_hierarquicas.keys())
+            
+            # Criando navegação por grupos
+            with st.sidebar:
+                # ── NOVA LOGO NA SIDEBAR ──────────────────────────────────────
+                st.image(LOGO_URL)
+                # ─────────────────────────────────────────────────────────────
+                st.title("Navegação por Grupos")
+                
+                tab1, tab2, tab3 = st.tabs([ "GESTÃO", "GOVERNANÇA", "SETORES"])
+                
+                with tab1:
+                    if st.button("**📊 Eficiência de Gestão**" if st.session_state.grupo_atual == 0 else "📊 Eficiência de Gestão"):
+                        st.session_state.grupo_atual = 0
+                    if st.button("**🏛️ Estruturas**" if st.session_state.grupo_atual == 1 else "🏛️ Estruturas"):
+                        st.session_state.grupo_atual = 1    
+                
+                with tab2:
+                    if st.button("**🔄 Gestão de Processos**" if st.session_state.grupo_atual == 2 else "🔄 Gestão de Processos"):
+                        st.session_state.grupo_atual = 2
+                    if st.button("**⚠️ Gestão de Riscos**" if st.session_state.grupo_atual == 3 else "⚠️ Gestão de Riscos"):
+                        st.session_state.grupo_atual = 3
+                    if st.button("**📝 Compliance**" if st.session_state.grupo_atual == 4 else "📝 Compliance"):
+                        st.session_state.grupo_atual = 4
+                    if st.button("**📢 Canal de Denúncias**" if st.session_state.grupo_atual == 5 else "📢 Canal de Denúncias"):
+                        st.session_state.grupo_atual = 5
+                    if st.button("**🏢 Governança Corporativa**" if st.session_state.grupo_atual == 6 else "🏢 Governança Corporativa"):
+                        st.session_state.grupo_atual = 6
+                
+                with tab3:
+                    if st.button("**👥 Recursos Humanos**" if st.session_state.grupo_atual == 7 else "👥 Recursos Humanos"):
+                        st.session_state.grupo_atual = 7
+                    if st.button("**💻 Tecnologia da Informação**" if st.session_state.grupo_atual == 8 else "💻 Tecnologia da Informação"):
+                        st.session_state.grupo_atual = 8
+                    if st.button("**🛒 Compras**" if st.session_state.grupo_atual == 9 else "🛒 Compras"):
+                        st.session_state.grupo_atual = 9
+                    if st.button("**📦 Estoques**" if st.session_state.grupo_atual == 10 else "📦 Estoques"):
+                        st.session_state.grupo_atual = 10
+                    if st.button("**💰 Contabilidade e Controle Financeiro**" if st.session_state.grupo_atual == 11 else "💰 Contabilidade e Controle Financeiro"):
+                        st.session_state.grupo_atual = 11
+                    if st.button("**🚚 Logística e Distribuição**" if st.session_state.grupo_atual == 12 else "🚚 Logística e Distribuição"):
+                        st.session_state.grupo_atual = 12
+
+                # Adicionar texto explicativo abaixo dos botões
+                st.write("""
+                Para garantir uma análise mais eficiente e resultados mais assertivos, recomendamos iniciar o diagnóstico pela aba 'Gestão', respondendo aos dois blocos de questões relacionados. 
+                Em seguida, prossiga para 'Governança' e, por fim, 'Setores'. 
+
+                No entanto, caso prefira, você pode navegar diretamente para qualquer aba específica de acordo com suas prioridades ou áreas de interesse imediato.
+                """)
+
+            grupo_atual = st.session_state.grupo_atual
+
+            # Textos introdutórios para cada grupo
+            TEXTO_GRUPO1 = """
+            O preenchimento de uma Matriz de Maturidade de Gestão Financeira é essencial para avaliar a eficiência dos processos financeiros, identificar lacunas e estruturar um plano de melhoria contínua. Ela permite medir o nível de controle sobre orçamento, fluxo de caixa, investimentos e riscos, fornecendo uma visão clara da saúde financeira da empresa. Além disso, facilita a tomada de decisões estratégicas, ajudando a mitigar riscos, otimizar recursos e garantir a sustentabilidade do negócio a longo prazo. Empresas que utilizam essa matriz conseguem se adaptar melhor a mudanças e aprimorar sua competitividade.
+            """
+            TEXTO_GRUPO2 = """
+            A avaliação da maturidade da estrutura de uma organização é um processo essencial para entender o nível de desenvolvimento e a eficácia das práticas de governança, gestão de riscos, compliance e processos organizacionais. Trata-se de um diagnóstico completo que permite identificar pontos fortes, fragilidades e oportunidades de melhoria em diferentes áreas estratégicas.
+            """
+            TEXTO_GRUPO3 = """
+            O preenchimento desta seção permite avaliar a maturidade do programa de Compliance, garantindo que a organização esteja em conformidade com regulamentações e boas práticas éticas. Ajuda a prevenir riscos legais, fortalecer a cultura organizacional e demonstrar compromisso com a integridade corporativa.
+            """
+            TEXTO_GRUPO4 = """
+            Responder a estas perguntas auxilia na identificação, monitoramento e mitigação de riscos que podem impactar a operação. Com uma gestão de riscos eficiente, a empresa minimiza perdas, melhora a tomada de decisão e se prepara para desafios internos e externos, garantindo maior resiliência operacional.
+            """
+            TEXTO_GRUPO5 = """
+            Esta seção permite avaliar a eficiência e a padronização dos processos internos. Um bom gerenciamento de processos melhora a produtividade, reduz desperdícios e assegura entregas consistentes. Além disso, facilita a implementação de melhorias contínuas e a adaptação a novas exigências do mercado.
+            """
+            TEXTO_GRUPO6 = """
+            A governança bem estruturada assegura transparência, ética e eficiência na gestão da empresa. Com este diagnóstico, é possível fortalecer a tomada de decisão, alinhar os interesses das partes interessadas e garantir um crescimento sustentável, reduzindo riscos e aumentando a confiança dos stakeholders.
+            """
+            TEXTO_GRUPO7 = """
+            Esta seção mede a maturidade da gestão de pessoas, garantindo que a empresa valorize seus colaboradores e mantenha um ambiente produtivo e inclusivo. Um RH eficiente melhora a retenção de talentos, impulsiona a inovação e alinha os funcionários à cultura e estratégia organizacional.
+            """
+            TEXTO_GRUPO8 = """
+            Responder a estas perguntas ajuda a avaliar o nível de digitalização e segurança da empresa. Uma TI bem estruturada melhora a eficiência operacional, protege dados sensíveis e impulsiona a inovação, garantindo que a organização esteja preparada para desafios tecnológicos e competitivos.
+            """
+            TEXTO_GRUPO9 = """
+            Esta seção permite identificar boas práticas e oportunidades de melhoria na gestão financeira. Com um controle eficiente, a empresa assegura sustentabilidade, reduz riscos de inadimplência e fraudes, melhora a liquidez e otimiza investimentos, garantindo saúde financeira e crescimento sustentável.
+            """
+            TEXTO_GRUPO10 = """
+            O diagnóstico nesta área assegura que as compras sejam estratégicas, alinhadas às necessidades da empresa e aos melhores preços e prazos. Com processos estruturados, a organização reduz custos, melhora a qualidade dos insumos e fortalece a relação com fornecedores confiáveis.
+            """
+            TEXTO_GRUPO11 = """
+            Avaliar a gestão de estoques permite reduzir desperdícios, evitar faltas e garantir uma operação eficiente. Com controle adequado, a empresa melhora a previsibilidade, reduz custos de armazenagem e assegura disponibilidade de produtos, otimizando o fluxo operacional.
+            """
+            TEXTO_GRUPO12 = """
+            Responder a estas perguntas possibilita otimizar a cadeia logística, garantindo entregas ágeis e redução de custos operacionais. Um bom planejamento melhora o nível de serviço, evita atrasos e assegura eficiência no transporte, impactando positivamente a satisfação do cliente.
+            """
+            TEXTO_GRUPO13 = """
+            Esta seção avalia a transparência e conformidade da contabilidade empresarial. Um controle rigoroso das demonstrações financeiras assegura a correta apuração de resultados, garantindo confiança e credibilidade junto a investidores e órgãos reguladores.
+            """
+
+            # Lista de perguntas obrigatórias
+            perguntas_obrigatorias = [
+                "1.02", "1.06", "1.42", "1.03", "1.13", "1.14", "1.30", "1.12", "1.19", "1.25", "1.41", "1.43", "1.27", "1.35", "1.45", "1.20",
+                "2.10", "2.01", "2.16", "2.23", "2.05", "2.08", "2.25", "2.29", "2.21", "2.22",
+                "3.01", "3.04", "3.08", "3.11", "3.29", "3.38", "3.40", "3.42", "3.43",
+                "4.01", "4.02", "4.03", "4.04", "4.05", "4.06", "4.07", "4.08", "4.09","4.10",
+                "5.01", "5.03", "5.04", "5.07", "5.10", "5.32", "5.35", "5.40"
+                "6.01", "6.02", "6.03", "6.04", "6.05", "6.06", "6.07", "6.08", "6.09","6.10", "6.11", "6.12",
+                "7.01", "7.02", "7.03", "7.04", "7.05", "7.06", "7.07", "7.08", "7.09","7.10",
+                "8.01", "8.02", "8.03", "8.04", "8.05", "8.06", "8.07", "8.08", "8.09","8.10","8.11","8.12","8.13","8.14","8.15","8.16","8.17",
+                "9.01", "9.02", "9.03", "9.04", "9.05", "9.06", "9.07", "9.08", "9.09","9.10",
+                "10.01", "10.02", "10.03", "10.04", "10.05", "10.06", "10.07", "10.08","10.09","10.10",
+                "11.01", "11.02", "11.03", "11.04", "11.05", "11.06", "11.07", "11.08","11.09","11.10",
+                "12.01", "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08","12.09","12.10",
+                "13.01", "13.02", "13.03", "13.04", "13.05", "13.06", "13.07", "13.08","13.09","13.10"
+            ]
+
+            # Grupos obrigatórios (4, 6, 7, 8, 9, 10, 11, 12, 13)
+            grupos_obrigatorios = [
+                "4 - Gestão de Riscos",
+                "6 - Governança Corporativa",
+                "7 - Recursos Humanos",
+                "8 - Tecnologia da Informação",
+                "9 - Compras",
+                "10 - Estoques",
+                "11 - Contabilidade e Controle Financeiro",
+                "12 - Logística e Distribuição",
+                "13 - Contabilidade e Controle Financeiro"
+            ]
+
+            if grupo_atual < len(grupos):
+                grupo = grupos[grupo_atual]
+
+                # Exibe o texto introdutório correspondente ao grupo atual
+                if grupo.startswith("1 -"):
+                    st.markdown(TEXTO_GRUPO1)
+                elif grupo.startswith("2 -"):
+                    st.markdown(TEXTO_GRUPO2)
+                elif grupo.startswith("3 -"):
+                    st.markdown(TEXTO_GRUPO3)
+                elif grupo.startswith("4 -"):
+                    st.markdown(TEXTO_GRUPO4)
+                elif grupo.startswith("5 -"):
+                    st.markdown(TEXTO_GRUPO5)
+                elif grupo.startswith("6 -"):
+                    st.markdown(TEXTO_GRUPO6)
+                elif grupo.startswith("7 -"):
+                    st.markdown(TEXTO_GRUPO7)
+                elif grupo.startswith("8 -"):
+                    st.markdown(TEXTO_GRUPO8)
+                elif grupo.startswith("9 -"):
+                    st.markdown(TEXTO_GRUPO9)
+                elif grupo.startswith("10 -"):
+                    st.markdown(TEXTO_GRUPO10)
+                elif grupo.startswith("11 -"):
+                    st.markdown(TEXTO_GRUPO11)
+                elif grupo.startswith("12 -"):
+                    st.markdown(TEXTO_GRUPO12)
+                elif grupo.startswith("13 -"):
+                    st.markdown(TEXTO_GRUPO13)
+
+                st.write(f"### {perguntas_hierarquicas[grupo]['titulo']}")
+                
+                # Verifica se todas as perguntas obrigatórias foram respondidas
+                todas_obrigatorias_preenchidas = True
+                obrigatorias_no_grupo = []
+                
+                for subitem, subpergunta in perguntas_hierarquicas[grupo]["subitens"].items():
+                    if subitem in perguntas_obrigatorias:
+                        obrigatorias_no_grupo.append(subitem)
+                        if st.session_state.respostas.get(subitem, "Selecione") == "Selecione":
+                            todas_obrigatorias_preenchidas = False
+
+                # Adicionando verificações para evitar erros ao acessar chaves inexistentes
+                for subitem, subpergunta in perguntas_hierarquicas[grupo]["subitens"].items():
+                    if subitem not in st.session_state.respostas:
+                        st.session_state.respostas[subitem] = "Selecione"  # Inicializa com "Selecione"
+
+                for subitem, subpergunta in perguntas_hierarquicas[grupo]["subitens"].items():
+                    if subitem not in st.session_state.respostas:
+                        st.session_state.respostas[subitem] = "Selecione"  # Inicializa com "Selecione"
+
+                # Dividindo as perguntas em blocos de 10
+                subitens = list(perguntas_hierarquicas[grupo]["subitens"].items())
+                blocos = [subitens[i:i + 10] for i in range(0, len(subitens), 10)]
+
+                for idx, bloco in enumerate(blocos):
+                    # Verifica se todas as perguntas do bloco foram respondidas
+                    bloco_preenchido = all(
+                        st.session_state.respostas.get(subitem, "Selecione") != "Selecione"
+                        for subitem, _ in bloco
+                    )
+                    # Destaca o bloco se estiver preenchido
+                    bloco_titulo = f"Bloco {idx + 1} de perguntas"
+                    if bloco_preenchido:
+                        bloco_titulo = f"✅ **:green[{bloco_titulo}]**"
+                    with st.expander(bloco_titulo, expanded=bloco_preenchido):
+                        for subitem, subpergunta in bloco:
+                            # Adiciona check se a pergunta foi respondida
+                            respondida = st.session_state.respostas.get(subitem, "Selecione") != "Selecione"
+                            check = " ✔️" if respondida else ""
+                            if subitem in perguntas_obrigatorias:
+                                pergunta_label = f"**:red[{subitem} - {subpergunta}]{check}** (OBRIGATÓRIO)"  # Destaca em vermelho
+                            else:
+                                pergunta_label = f"{subitem} - {subpergunta}{check}"
+
+                            resposta = st.selectbox(
+                                pergunta_label,
+                                options=list(mapeamento_respostas.keys()),
+                                index=list(mapeamento_respostas.keys()).index(st.session_state.respostas[subitem])
+                            )
+                            st.session_state.respostas[subitem] = resposta
+
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    if st.button("⬅️ Voltar"):
+                        if st.session_state.grupo_atual > 0:
+                            st.session_state.grupo_atual -= 1
+                            st.session_state.mostrar_graficos = False
+                with col2:
+                    if st.button("➡️ Prosseguir"):
+                        # Verifica se todas as perguntas obrigatórias do grupo atual foram respondidas
+                        obrigatorias_no_grupo = [
+                            subitem for subitem in perguntas_hierarquicas[grupo]["subitens"].keys()
+                            if subitem in perguntas_obrigatorias
+                        ]
+                        todas_obrigatorias_preenchidas = all(
+                            st.session_state.respostas.get(subitem, "Selecione") != "Selecione"
+                            for subitem in obrigatorias_no_grupo
+                        )
+
+                        if not todas_obrigatorias_preenchidas:
+                            st.error(f"Ops...! Para concluir esse grupo você precisa revisar todas as perguntas obrigatórias: {', '.join(obrigatorias_no_grupo)}")
+                        else:
+                            # Avança para o próximo grupo
+                            st.session_state.grupo_atual += 1
+                            st.session_state.mostrar_graficos = False
+                            st.success("Você avançou para o próximo grupo.")
+                with col3:
+                    if st.button("💾 Salvar Progresso"):
+                        salvar_respostas(st.session_state.nome, st.session_state.email, st.session_state.respostas)
+                    # Substituir os dois botões por um só
+                    if st.button("📊 Gerar Gráficos e Enviar por Email"):
+                        fig_original, fig_normalizado = gerar_graficos_radar(perguntas_hierarquicas, st.session_state.respostas)
+                        if fig_original is None or fig_normalizado is None:
+                            st.error("Os gráficos não foram gerados corretamente. Verifique os dados de entrada.")
+                        else:
+                            excel_data = exportar_questionario(st.session_state.respostas, perguntas_hierarquicas)
+                            if enviar_email(st.session_state.email, excel_data, fig_original, fig_normalizado):
+                                st.success(f"Relatório enviado com sucesso para o email {st.session_state.email}!")
+                            st.session_state.mostrar_graficos = True
+
+                if st.session_state.mostrar_graficos:
+                    # Mensagem de Relatório de Progresso
+                    grupo_atual_nome = grupos[st.session_state.grupo_atual]
+                    respostas_numericas = {k: mapeamento_respostas[v] for k, v in st.session_state.respostas.items()}
+                    soma_respostas = sum(respostas_numericas[subitem] for subitem in perguntas_hierarquicas[grupo_atual_nome]["subitens"].keys())
+                    num_perguntas = len(perguntas_hierarquicas[grupo_atual_nome]["subitens"])
+                    if num_perguntas > 0:
+                        valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
+                        nivel_atual = ""
+                        if valor_percentual < 26:
+                            nivel_atual = "INICIAL"
+                        elif valor_percentual < 51:
+                            nivel_atual = "ORGANIZAÇÃO"
+                        elif valor_percentual < 71:
+                            nivel_atual = "CONSOLIDAÇÃO"
+                        elif valor_percentual < 90:
+                            nivel_atual = "OTIMIZAÇÃO"
+                        elif valor_percentual >= 91:
+                            nivel_atual = "EXCELÊNCIA"
+
+                        # Determinar os próximos blocos
+                        proximos_blocos = grupos[st.session_state.grupo_atual + 1:] if st.session_state.grupo_atual + 1 < len(grupos) else []
+                        proximos_blocos_texto = ", ".join(proximos_blocos) if proximos_blocos else "Nenhum bloco restante."
+
+                        # Exibir a mensagem
+                        st.markdown(f"""
+                        ### Relatório de Progresso
+
+                        Você completou o Bloco **{grupo_atual_nome}**. Os resultados indicam que o seu nível de maturidade neste bloco é classificado como: **{nivel_atual}**.
+
+                        Para aprofundarmos a análise e oferecermos insights mais estratégicos, recomendamos que você complete também:
+
+                        **{proximos_blocos_texto}**
+
+                        Nossos consultores especializados receberão este relatório e entrarão em contato para agendar uma discussão personalizada. Juntos, identificaremos oportunidades de melhoria e traçaremos os próximos passos para otimizar os processos da sua organização.
+                        """)
+
+                    # Gerar gráficos
+                    fig_original, fig_normalizado = gerar_graficos_radar(perguntas_hierarquicas, st.session_state.respostas)
+                    if fig_original and fig_normalizado:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.plotly_chart(fig_original, use_container_width=True)
+                        with col2:
+                            st.plotly_chart(fig_normalizado, use_container_width=True)
+
+                        # Calcular e exibir o nível atual apenas para o grupo atual
+                        mostrar_nivel_atual_por_grupo(grupo_atual_nome, valor_percentual)
+            else:
+                st.write("### Todas as perguntas foram respondidas!")
+                if st.button("Gerar Gráfico Final"):
+                    # Verifica se todas as perguntas obrigatórias foram respondidas
+                    todas_obrigatorias_respondidas = True
+                    obrigatorias_nao_respondidas = []
+                    
+                    for pergunta in perguntas_obrigatorias:
+                        if pergunta not in st.session_state.respostas or st.session_state.respostas.get(pergunta, "Selecione") == "Selecione":
+                            todas_obrigatorias_respondidas = False
+                            obrigatorias_nao_respondidas.append(pergunta)
+                    
+                    # Verifica se todos os grupos obrigatórios foram completamente respondidos
+                    grupos_obrigatorios_completos = True
+                    grupos_incompletos = []
+                    
+                    for grupo_obrigatorio in grupos_obrigatorios:
+                        if grupo_obrigatorio in perguntas_hierarquicas:
+                            for subitem in perguntas_hierarquicas[grupo_obrigatorio]["subitens"].keys():
+                                if subitem not in st.session_state.respostas or st.session_state.respostas.get(subitem, "Selecione") == "Selecione":
+                                    grupos_obrigatorios_completos = False
+                                    grupos_incompletos.append(grupo_obrigatorio)
+                                    break
+                    
+                    if not todas_obrigatorias_respondidas or not grupos_obrigatorios_completos:
+                        mensagem_erro = []
+                        if not todas_obrigatorias_respondidas:
+                            mensagem_erro.append(f"Perguntas obrigatórias não respondidas: {', '.join(obrigatorias_nao_respondidas)}")
+                        if not grupos_obrigatorios_completos:
+                            mensagem_erro.append(f"Grupos obrigatórios incompletos: {', '.join(set(grupos_incompletos))}")
+                        st.error(" | ".join(mensagem_erro))
+                    else:
+                        # Adicionando logs para depuração
+                        try:
+                            respostas = {k: mapeamento_respostas.get(v, 0) for k, v in st.session_state.respostas.items()}
+                            categorias = []
+                            valores = []
+                            valores_normalizados = []
+                            soma_total_respostas = sum(respostas.values())
+                            for item, conteudo in perguntas_hierarquicas.items():
+                                soma_respostas = sum(respostas[subitem] for subitem in conteudo["subitens"].keys())
+                                num_perguntas = len(conteudo["subitens"])
+                                if num_perguntas > 0:
+                                    valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
+                                    valor_normalizado = (soma_respostas / valor_percentual) * 100 if valor_percentual > 0 else 0
+                                    categorias.append(conteudo["titulo"])
+                                    valores.append(valor_percentual)
+                                    valores_normalizados.append(valor_normalizado)
+                            if len(categorias) != len(valores) or len(categorias) != len(valores_normalizados):
+                                st.error("Erro: As listas de categorias e valores têm tamanhos diferentes.")
+                            else:
+                                if categorias:
+                                    valores_original = valores + valores[:1]
+                                    categorias_original = categorias + categorias[:1]
+                                    fig_original = go.Figure()
+                                    fig_original.add_trace(go.Scatterpolar(
+                                        r=valores_original,
+                                        theta=categorias_original,
+                                        fill='toself',
+                                        name='Gráfico Original'
+                                    ))
+                                    fig_original.update_layout(
+                                        polar=dict(
+                                            radialaxis=dict(
+                                                visible=True,
+                                                range=[0, 100]
+                                            )),
+                                        showlegend=False
+                                    )
+                                    valores_normalizados_fechado = valores_normalizados + valores_normalizados[:1]
+                                    fig_normalizado = go.Figure()
+                                    fig_normalizado.add_trace(go.Scatterpolar(
+                                        r=valores_normalizados_fechado,
+                                        theta=categorias_original,
+                                        fill='toself',
+                                        name='Gráfico Normalizado'
+                                    ))
+                                    fig_normalizado.update_layout(
+                                        polar=dict(
+                                            radialaxis=dict(
+                                                visible=True,
+                                                range=[0, 100]
+                                            )),
+                                        showlegend=False
+                                    )
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        st.plotly_chart(fig_original, use_container_width=True)
+                                        st.write("### Gráfico 1")
+                                        df_grafico_original = pd.DataFrame({'Categoria': categorias, 'Porcentagem': valores})
+                                        total_porcentagem = df_grafico_original['Porcentagem'].sum()
+                                        df_grafico_original.loc['Total'] = ['Total', total_porcentagem]
+                                        st.dataframe(df_grafico_original)
+
+                                        if total_porcentagem < 26:
+                                            st.warning("SEU NIVEL É INICIAL")
+                                        elif total_porcentagem < 51:
+                                            st.warning("SEU NIVEL É ORGANIZAÇÃO")
+                                        elif total_porcentagem < 71:
+                                            st.warning("SEU NIVEL É CONSOLIDAÇÃO")
+                                        elif total_porcentagem < 90:
+                                            st.warning("SEU NIVEL É OTIMIZAÇÃO")
+                                        elif total_porcentagem >= 91:
+                                            st.success("SEU NIVEL É EXCELÊNCIA")
+                                    with col2:
+                                        st.plotly_chart(fig_normalizado, use_container_width=True)
+                                        st.write("### Gráfico 2")
+                                        df_grafico_normalizado = pd.DataFrame({'Categoria': categorias, 'Porcentagem Normalizada': valores_normalizados})
+                                        st.dataframe(df_grafico_normalizado)
+                                    
+                                    # Mostrar nível de maturidade completo
+                                    mostrar_nivel_maturidade(total_porcentagem)
+                                    
+                                    excel_data = exportar_questionario(st.session_state.respostas, perguntas_hierarquicas)
+                                    st.download_button(
+                                        label="Exportar para Excel",
+                                        data=excel_data,
+                                        file_name="questionario_preenchido.xlsx",
+                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    )
+                        except KeyError as e:
+                            st.error(f"Erro ao acessar chave inexistente: {e}")
+                            st.write("Estado atual das respostas:", st.session_state.respostas)
+                            st.write("Perguntas obrigatórias:", perguntas_obrigatorias)
+                            st.write("Perguntas hierárquicas:", perguntas_hierarquicas)
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao carregar o arquivo: {e}")
+
+# Garantir que perguntas_hierarquicas esteja definido
+if 'perguntas_hierarquicas' not in locals():
+    perguntas_hierarquicas = {}
+
+# Garantir que perguntas_obrigatorias esteja definido
+if 'perguntas_obrigatorias' not in locals():
+    perguntas_obrigatorias = []
+
+# Garantir que todas as perguntas obrigatórias sejam inicializadas no dicionário de respostas
+for grupo, conteudo in perguntas_hierarquicas.items():
+    for subitem in conteudo["subitens"].keys():
+        if subitem not in st.session_state.respostas:
+            st.session_state.respostas[subitem] = "Selecione"  # Inicializa com "Selecione"
+
+# Adicionando verificações para evitar erros ao acessar chaves inexistentes
+try:
+    respostas = {k: mapeamento_respostas.get(v, 0) for k, v in st.session_state.respostas.items()}
+except KeyError as e:
+    st.error(f"Erro ao acessar chave inexistente: {e}")
+    st.write("Estado atual das respostas:", st.session_state.respostas)
+    st.write("Perguntas hierárquicas:", perguntas_hierarquicas)
