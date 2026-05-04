@@ -1,1288 +1,2291 @@
 import streamlit as st
+from datetime import datetime
 import pandas as pd
-import numpy as np
-from io import BytesIO
-import requests
+import plotly.express as px
 import plotly.graph_objects as go
-import base64  # Para converter imagens em base64
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-import json  # Para salvar e carregar dados em formato JSON
+from typing import Optional, Dict, Any
+import chardet
+from io import BytesIO
+import time
+import xml.etree.ElementTree as ET
+import os
+import traceback
+import numpy as np
+import fitz
+import pdfplumber
+import re
+from lxml import etree
+import tempfile
+import logging
+import gc
+import sqlite3
+from datetime import timedelta, date
+from typing import List, Tuple
+import io
+import contextlib
+import base64
+import hashlib
+import xml.dom.minidom
+from pathlib import Path
+import random
 
-st.set_page_config(page_title="Maturity Reali Consultoria",layout='wide', page_icon="⚖️")
+# ==============================================================================
+# CONFIGURAÇÃO AUTOMÁTICA DO SERVIDOR STREAMLIT
+# Suporta PDFs gigantes — até 2 GB
+# ==============================================================================
+_PDF_CHUNK_PAGES = 50  # Páginas processadas por lote — evita OOM em PDFs de 1000+ páginas
 
-st.markdown("""
-<style>
-    /* Animação para todos os botões */
-    .stButton>button {
-        transition: all 0.3s ease;
-        transform: scale(1);
+def setup_streamlit_config():
+    try:
+        os.makedirs(".streamlit", exist_ok=True)
+        config_path = os.path.join(".streamlit", "config.toml")
+        # Sempre sobrescreve para garantir os limites corretos
+        with open(config_path, "w", encoding="utf-8") as f:
+            f.write("[server]\nmaxUploadSize = 2000\nmaxMessageSize = 2000\n")
+    except Exception:
+        pass
+
+setup_streamlit_config()
+
+# ==============================================================================
+# CONFIGURAÇÃO INICIAL
+# ==============================================================================
+st.set_page_config(
+    page_title="Sistema de Processamento Unificado 2026",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+CTE_NAMESPACES = {'cte': 'http://www.portalfiscal.inf.br/cte'}
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ==============================================================================
+# SESSION STATE
+# ==============================================================================
+_defaults = {
+    'selected_xml': None, 'cte_data': None,
+    'parsed_duimp': None, 'parsed_sigraweb': None,
+    'merged_df': None, 'last_duimp': None,
+    'layout_app2': 'sigraweb',
+}
+for k, v in _defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+# ==============================================================================
+# HELPERS UI
+# ==============================================================================
+def show_loading_animation(message="Processando..."):
+    with st.spinner(message):
+        pb = st.progress(0)
+        for i in range(100):
+            time.sleep(0.01)
+            pb.progress(i + 1)
+        pb.empty()
+
+def show_processing_animation(message="Analisando dados..."):
+    ph = st.empty()
+    with ph.container():
+        _, c, _ = st.columns([1, 2, 1])
+        with c:
+            st.info(f"⏳ {message}")
+            sp = st.empty()
+            chars = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"]
+            for i in range(20):
+                sp.markdown(f"<div style='text-align:center;font-size:24px'>{chars[i%8]}</div>",
+                            unsafe_allow_html=True)
+                time.sleep(0.1)
+    ph.empty()
+
+def show_success_animation(message="Concluído!"):
+    ph = st.empty()
+    with ph.container():
+        st.success(f"✅ {message}")
+        time.sleep(1.2)
+    ph.empty()
+
+def ph(html: str):
+    """Shortcut for st.markdown with unsafe_allow_html=True"""
+    st.markdown(html, unsafe_allow_html=True)
+
+def page_header(icon: str, title: str, sub: str):
+    ph(f"""
+    <div class="ph">
+        <span class="ph-icon">{icon}</span>
+        <div><div class="ph-title">{title}</div>
+        <div class="ph-sub">{sub}</div></div>
+    </div>""")
+
+def section_title(text: str):
+    ph(f'<div class="stitle">{text}</div>')
+
+def empty_state(icon: str, title: str, sub: str = ""):
+    ph(f"""
+    <div class="empty">
+        <div class="empty-icon">{icon}</div>
+        <div class="empty-title">{title}</div>
+        <div class="empty-sub">{sub}</div>
+    </div>""")
+
+def status_ok(text: str):
+    ph(f'<div class="sbox sbox-ok">✅ {text}</div>')
+
+def status_warn(text: str):
+    ph(f'<div class="sbox sbox-warn">⚠️ {text}</div>')
+
+# ==============================================================================
+# CSS
+# ==============================================================================
+def load_css():
+    ph("""<style>
+    /* ── tokens ── */
+    :root{
+        --navy:#0F172A; --blue:#1E3A8A; --blue-m:#2563EB; --blue-l:#3B82F6;
+        --blue-bg:#EFF6FF; --blue-b:#BFDBFE;
+        --green:#059669; --green-bg:#D1FAE5;
+        --amber:#D97706; --amber-bg:#FEF3C7;
+        --red:#DC2626;
+        --bg:#F1F5F9; --surface:#FFFFFF;
+        --border:#E2E8F0; --muted:#64748B;
+        --r:8px; --r-lg:16px; --r-xl:22px;
+        --sh0:0 1px 2px rgba(0,0,0,.05);
+        --sh1:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.05);
+        --sh2:0 4px 16px rgba(0,0,0,.10);
+        --sh3:0 12px 36px rgba(0,0,0,.14);
+        --tr:all .18s cubic-bezier(.4,0,.2,1);
+        --glow:0 0 0 3px rgba(59,130,246,.20);
     }
-    
-    .stButton>button:hover {
-        transform: scale(1.05);
-        box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+
+    /* ── base ── */
+    html,body,[class*="css"]{font-family:'Inter','Segoe UI',system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
+    ::-webkit-scrollbar{width:5px;height:5px}
+    ::-webkit-scrollbar-track{background:var(--bg);border-radius:10px}
+    ::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:10px}
+    ::-webkit-scrollbar-thumb:hover{background:#94A3B8}
+    .block-container{padding-top:1.2rem!important}
+
+    /* ── hero ── */
+    .hero{
+        position:relative;
+        background:linear-gradient(135deg,#0F172A 0%,#1E3A8A 52%,#1D4ED8 100%);
+        border-radius:var(--r-xl);padding:2.4rem 3rem 2rem;margin-bottom:1.4rem;
+        text-align:center;overflow:hidden;
     }
-    
-    /* Animação específica para botão de prosseguir */
-    button[kind="primary"] {
-        background-color: #4CAF50;
-        color: white;
-        border: none;
-        animation: pulse 2s infinite;
+    .hero::before{
+        content:'';position:absolute;inset:0;
+        background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),
+                         linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);
+        background-size:40px 40px;pointer-events:none;
     }
-    
-    button[kind="primary"]:hover {
-        background-color: #45a049;
-        animation: none;
+    .hero::after{
+        content:'';position:absolute;right:-60px;top:-60px;
+        width:260px;height:260px;border-radius:50%;
+        background:radial-gradient(circle,rgba(96,165,250,.20) 0%,transparent 70%);
+        pointer-events:none;
     }
-    
-    /* Animação de pulsar */
-    @keyframes pulse {
-        0% {
-            transform: scale(1);
-        }
-        50% {
-            transform: scale(1.05);
-        }
-        100% {
-            transform: scale(1);
-        }
+    .hero-logo{max-width:190px;margin-bottom:.9rem;
+               filter:drop-shadow(0 4px 14px rgba(0,0,0,.35));position:relative;z-index:1;}
+    .hero-title{font-size:2.1rem;font-weight:800;color:#fff;margin:0 0 .35rem;
+                letter-spacing:-.6px;line-height:1.15;position:relative;z-index:1;}
+    .hero-sub{font-size:.92rem;color:rgba(255,255,255,.68);margin:0 0 1.2rem;
+              position:relative;z-index:1;}
+    .hero-chips{display:flex;justify-content:center;gap:.45rem;flex-wrap:wrap;position:relative;z-index:1;}
+    .chip{display:inline-flex;align-items:center;gap:.3rem;
+          background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);
+          color:rgba(255,255,255,.92);border-radius:20px;padding:.2rem .72rem;
+          font-size:.75rem;font-weight:600;letter-spacing:.3px;transition:var(--tr);}
+    .chip:hover{background:rgba(255,255,255,.22);}
+
+    /* ── page header ── */
+    .ph{display:flex;align-items:center;gap:.9rem;
+        background:var(--surface);border:1px solid var(--border);
+        border-radius:var(--r);padding:.9rem 1.2rem;margin-bottom:1.1rem;
+        box-shadow:var(--sh0);}
+    .ph-icon{font-size:1.9rem;flex-shrink:0;line-height:1;}
+    .ph-title{font-size:1.25rem;font-weight:800;color:var(--blue);line-height:1.2;}
+    .ph-sub{font-size:.8rem;color:var(--muted);margin-top:.1rem;}
+
+    /* ── section title ── */
+    .stitle{display:flex;align-items:center;font-size:.92rem;font-weight:700;
+            color:var(--blue);padding:.45rem 0 .45rem .75rem;
+            border-left:3px solid var(--blue-l);margin:1rem 0 .6rem;
+            background:linear-gradient(90deg,rgba(59,130,246,.06),transparent);
+            border-radius:0 var(--r) var(--r) 0;}
+
+    /* ── cards ── */
+    .card{background:var(--surface);border-radius:var(--r);
+          border:1px solid var(--border);box-shadow:var(--sh1);
+          padding:1.2rem 1.4rem;margin-bottom:1rem;transition:var(--tr);}
+    .card:hover{box-shadow:var(--sh2);border-color:var(--blue-b);}
+
+    /* ── upload zone ── */
+    .uzone{background:var(--blue-bg);border:2px dashed #93C5FD;
+           border-radius:var(--r);padding:.85rem 1rem;text-align:center;
+           margin-bottom:.5rem;transition:var(--tr);}
+    .uzone:hover{border-color:var(--blue-l);background:#DBEAFE;}
+    .uzone-icon{font-size:1.5rem;line-height:1;}
+    .uzone-title{font-weight:700;color:var(--blue);font-size:.88rem;margin-top:.2rem;}
+    .uzone-sub{font-size:.75rem;color:var(--muted);margin-top:.1rem;}
+
+    /* ── status boxes ── */
+    .sbox{padding:.65rem 1rem;border-radius:var(--r);
+          font-size:.88rem;font-weight:500;margin:.4rem 0;}
+    .sbox-ok{background:var(--green-bg);color:#065F46;border-left:3px solid var(--green);}
+    .sbox-warn{background:var(--amber-bg);color:#78350F;border-left:3px solid var(--amber);}
+
+    /* ── layout badge ── */
+    .lbadge{display:inline-flex;align-items:center;gap:.35rem;
+            background:var(--blue-m);color:#fff;border-radius:var(--r);
+            padding:.3rem .8rem;font-size:.8rem;font-weight:700;margin-top:.45rem;}
+    .lbadge.amber{background:var(--amber);}
+
+    /* ── empty state ── */
+    .empty{text-align:center;padding:2.8rem 1rem;color:var(--muted);}
+    .empty-icon{font-size:2.8rem;margin-bottom:.5rem;opacity:.55;}
+    .empty-title{font-size:1rem;font-weight:700;color:#94A3B8;margin-bottom:.25rem;}
+    .empty-sub{font-size:.82rem;color:#CBD5E1;}
+
+    /* ── info pill ── */
+    .ipill{display:inline-flex;align-items:center;gap:.35rem;
+           background:var(--blue-bg);border:1px solid var(--blue-b);
+           color:var(--blue);border-radius:20px;padding:.22rem .8rem;
+           font-size:.78rem;font-weight:600;margin-bottom:.5rem;}
+
+    /* ── field label ── */
+    .flabel{font-size:.78rem;font-weight:600;color:var(--muted);
+            text-transform:uppercase;letter-spacing:.5px;margin-bottom:.2rem;}
+
+    /* ── tabs ── */
+    .stTabs [data-baseweb="tab-list"]{
+        gap:3px;background:var(--bg);border-radius:var(--r);
+        padding:4px;border:1px solid var(--border);}
+    .stTabs [data-baseweb="tab"]{
+        border-radius:6px;font-weight:600;font-size:.86rem;
+        padding:.4rem .95rem;transition:var(--tr);color:var(--muted);}
+    .stTabs [data-baseweb="tab"]:hover{color:var(--blue-m);background:rgba(59,130,246,.08);}
+    .stTabs [aria-selected="true"]{
+        background:var(--surface)!important;color:var(--blue)!important;
+        box-shadow:var(--sh1)!important;}
+
+    /* ── buttons ── */
+    .stButton>button{width:100%;border-radius:var(--r);font-weight:600;
+                     font-size:.86rem;letter-spacing:.1px;transition:var(--tr);}
+    .stButton>button:hover{transform:translateY(-1px);box-shadow:var(--sh2);}
+    .stButton>button:active{transform:translateY(0);box-shadow:var(--sh0);}
+
+    /* ── radio ── */
+    div[data-testid="stRadio"]>div{gap:.45rem;}
+    div[data-testid="stRadio"] label{
+        background:var(--surface);border:1.5px solid var(--border);
+        border-radius:var(--r);padding:.5rem .9rem;cursor:pointer;
+        transition:var(--tr);font-weight:500;font-size:.86rem;}
+    div[data-testid="stRadio"] label:hover{border-color:var(--blue-l);background:var(--blue-bg);}
+
+    /* ── expander ── */
+    .streamlit-expanderHeader{font-weight:600;font-size:.88rem;color:var(--blue);
+                               background:var(--bg);border-radius:6px;padding:.45rem .75rem!important;}
+
+    /* ── metrics ── */
+    [data-testid="metric-container"]{
+        background:var(--surface);border:1px solid var(--border);
+        border-radius:var(--r);padding:.7rem .9rem;box-shadow:var(--sh0);transition:var(--tr);}
+    [data-testid="metric-container"]:hover{box-shadow:var(--sh1);border-color:var(--blue-b);}
+    [data-testid="stMetricValue"]{font-size:1.2rem!important;font-weight:700!important;color:var(--blue)!important;}
+    [data-testid="stMetricLabel"]{font-size:.74rem!important;font-weight:600!important;
+                                  color:var(--muted)!important;text-transform:uppercase;letter-spacing:.45px;}
+
+    /* ── inputs ── */
+    .stTextInput input,.stNumberInput input{
+        border-radius:var(--r)!important;border:1.5px solid var(--border)!important;
+        font-size:.86rem!important;transition:var(--tr);}
+    .stTextInput input:focus,.stNumberInput input:focus{
+        border-color:var(--blue-l)!important;box-shadow:var(--glow)!important;}
+
+    /* ── dataframe / editor ── */
+    [data-testid="stDataFrame"],[data-testid="stDataEditor"]{
+        border-radius:var(--r);border:1px solid var(--border)!important;overflow:hidden;}
+
+    /* ── divider ── */
+    hr{border:none;border-top:1px solid var(--border);margin:.9rem 0;}
+
+    /* ── animations ── */
+    @keyframes spin{to{transform:rotate(360deg)}}
+    .spinner{animation:spin 1.2s linear infinite;display:inline-block;}
+    @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+    .fade-up{animation:fadeUp .28s ease forwards;}
+
+    /* ── responsive ── */
+    @media(max-width:900px){
+        .hero{padding:1.8rem 1.4rem 1.5rem;}
+        .hero-title{font-size:1.55rem;}
+        .hero-logo{max-width:140px;}
     }
-    
-    /* Animação para botão de voltar */
-    button[kind="secondary"] {
-        transition: all 0.3s ease;
+    @media(max-width:600px){
+        .hero-title{font-size:1.3rem;}
+        .hero{padding:1.3rem 1rem 1.1rem;border-radius:var(--r-lg);}
+        .stTabs [data-baseweb="tab"]{padding:.32rem .55rem;font-size:.78rem;}
+        .chip{font-size:.68rem;padding:.15rem .55rem;}
     }
-    
-    button[kind="secondary"]:hover {
-        background-color: #f1f1f1;
-        transform: translateX(-5px);
-    }
-    
-    /* Animação para botão de enviar email */
-    button:contains("ENVIAR POR EMAIL") {
-        background-color: #FF5722;
-        color: white;
-        transition: all 0.3s ease;
-    }
-    
-    button:contains("ENVIAR POR EMAIL"):hover {
-        background-color: #E64A19;
-        transform: translateY(-3px);
-        box-shadow: 0 10px 20px rgba(0,0,0,0.2);
-    }
-    
-    /* Animação para botão de salvar progresso */
-    button:contains("Salvar Progresso") {
-        background-color: #2196F3;
-        color: white;
-        transition: all 0.3s ease;
-    }
-    
-    button:contains("Salvar Progresso"):hover {
-        background-color: #0b7dda;
-        transform: translateY(-3px);
-    }
-    
-    /* Animação para botões de navegação */
-    div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] button {
-        transition: all 0.3s ease;
-    }
-    
-    div[data-testid="stVerticalBlock"] > div[data-testid="stHorizontalBlock"] button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
-    
-    /* Destaque para botão ativo na sidebar */
-    button[aria-pressed="true"] {
-        background-color: #4CAF50 !important;
-        color: white !important;
-        font-weight: bold;
-        transform: scale(1.05);
-        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
-    }
-</style>
-""", unsafe_allow_html=True)
+    </style>""")
 
 
-# Mapeamento das respostas de texto para valores numéricos
-mapeamento_respostas = {
-    "Selecione": 0,  # Adicionando "Selecione" como valor padrão
-    "Não Possui": 1,
-    "Insatisfatório": 2,
-    "Controlado": 3,
-    "Eficiente": 4,
-    "Otimizado": 5
+# ==============================================================================
+# PARTE 1 — PROCESSADOR TXT
+# ==============================================================================
+def processador_txt():
+    page_header("📄", "Processador de Arquivos TXT",
+                "Remova linhas indesejadas e substitua padrões em arquivos TXT")
+
+    # ── lógica interna (inalterada) ──────────────────────────────────────
+    def detectar_encoding(conteudo):
+        return chardet.detect(conteudo)['encoding']
+
+    def processar_arquivo(conteudo, padroes):
+        try:
+            substituicoes = {
+                "IMPOSTO IMPORTACAO": "IMP IMPORT",
+                "TAXA SICOMEX": "TX SISCOMEX",
+                "FRETE INTERNACIONAL": "FRET INTER",
+                "SEGURO INTERNACIONAL": "SEG INTERN",
+            }
+            encoding = detectar_encoding(conteudo)
+            try:
+                texto = conteudo.decode(encoding)
+            except UnicodeDecodeError:
+                texto = conteudo.decode('latin-1')
+            linhas = texto.splitlines()
+            out = []
+            for linha in linhas:
+                linha = linha.strip()
+                if not any(p in linha for p in padroes):
+                    for orig, sub in substituicoes.items():
+                        linha = linha.replace(orig, sub)
+                    out.append(linha)
+            return "\n".join(out), len(linhas)
+        except Exception as e:
+            st.error(f"Erro ao processar: {str(e)}")
+            return None, 0
+
+    padroes_default = ["-------", "SPED EFD-ICMS/IPI"]
+
+    # ── layout ───────────────────────────────────────────────────────────
+    col_up, col_cfg = st.columns([3, 2], gap="large")
+
+    with col_up:
+        ph('<p class="flabel">📁 Selecione o arquivo TXT</p>')
+        arquivo = st.file_uploader("Selecione o arquivo TXT", type=['txt'])
+
+    with col_cfg:
+        with st.expander("⚙️ Padrões adicionais de remoção"):
+            padroes_add = st.text_input("Padrões (vírgula)", placeholder="Ex: TOTAL, SOMA")
+            padroes = padroes_default + [
+                p.strip() for p in padroes_add.split(",") if p.strip()
+            ] if padroes_add else padroes_default
+        ph(f'<div class="ipill">🔍 {len(padroes)} padrões ativos</div>')
+
+    if arquivo is not None:
+        st.markdown("")
+        if st.button("🔄 Processar Arquivo TXT", type="primary", use_container_width=True):
+            try:
+                show_loading_animation("Analisando arquivo...")
+                conteudo = arquivo.read()
+                show_processing_animation("Processando linhas...")
+                resultado, total = processar_arquivo(conteudo, padroes)
+                if resultado is not None:
+                    show_success_animation("Processamento concluído!")
+                    mantidas  = len(resultado.splitlines())
+                    removidas = total - mantidas
+                    k1, k2, k3 = st.columns(3)
+                    k1.metric("📋 Originais",  total)
+                    k2.metric("✅ Mantidas",   mantidas)
+                    k3.metric("🗑️ Removidas",  removidas,
+                              delta=f"-{removidas}", delta_color="inverse")
+                    section_title("👁️ Prévia")
+                    st.text_area("Conteúdo processado", resultado, height=260)
+                    buf = BytesIO()
+                    buf.write(resultado.encode('utf-8'))
+                    buf.seek(0)
+                    st.download_button("⬇️ Baixar arquivo processado", data=buf,
+                                       file_name=f"processado_{arquivo.name}",
+                                       mime="text/plain", use_container_width=True)
+            except Exception as e:
+                st.error(f"Erro: {str(e)}")
+    else:
+        empty_state("📂", "Nenhum arquivo carregado",
+                    "Selecione um arquivo .TXT acima para começar")
+
+
+# ==============================================================================
+# PARTE 2 — CLASSE CTeProcessorDirect (lógica 100% original)
+# ==============================================================================
+class CTeProcessorDirect:
+    def __init__(self):
+        self.processed_data = []
+
+    def extract_nfe_number_from_key(self, chave_acesso):
+        if not chave_acesso or len(chave_acesso) != 44:
+            return None
+        try:
+            return chave_acesso[25:34]
+        except Exception:
+            return None
+
+    def extract_peso_bruto(self, root):
+        try:
+            tipos_peso = ['PESO BRUTO', 'PESO BASE DE CALCULO', 'PESO BASE CÁLCULO', 'PESO']
+            for prefix, uri in CTE_NAMESPACES.items():
+                for infQ in root.findall(f'.//{{{uri}}}infQ'):
+                    tpMed  = infQ.find(f'{{{uri}}}tpMed')
+                    qCarga = infQ.find(f'{{{uri}}}qCarga')
+                    if tpMed is not None and tpMed.text and qCarga is not None and qCarga.text:
+                        for tp in tipos_peso:
+                            if tp in tpMed.text.upper():
+                                return float(qCarga.text), tp
+            for infQ in root.findall('.//infQ'):
+                tpMed  = infQ.find('tpMed')
+                qCarga = infQ.find('qCarga')
+                if tpMed is not None and tpMed.text and qCarga is not None and qCarga.text:
+                    for tp in tipos_peso:
+                        if tp in tpMed.text.upper():
+                            return float(qCarga.text), tp
+            return 0.0, "Não encontrado"
+        except Exception as e:
+            st.warning(f"Não foi possível extrair o peso: {str(e)}")
+            return 0.0, "Erro na extração"
+
+    def extract_cte_data(self, xml_content, filename):
+        try:
+            root = ET.fromstring(xml_content)
+            for prefix, uri in CTE_NAMESPACES.items():
+                ET.register_namespace(prefix, uri)
+
+            def find_text(element, xpath):
+                try:
+                    for prefix, uri in CTE_NAMESPACES.items():
+                        found = element.find(xpath.replace('cte:', f'{{{uri}}}'))
+                        if found is not None and found.text:
+                            return found.text
+                    found = element.find(xpath.replace('cte:', ''))
+                    if found is not None and found.text:
+                        return found.text
+                    return None
+                except Exception:
+                    return None
+
+            nCT        = find_text(root, './/cte:nCT')
+            dhEmi      = find_text(root, './/cte:dhEmi')
+            cMunIni    = find_text(root, './/cte:cMunIni')
+            UFIni      = find_text(root, './/cte:UFIni')
+            cMunFim    = find_text(root, './/cte:cMunFim')
+            UFFim      = find_text(root, './/cte:UFFim')
+            emit_xNome = find_text(root, './/cte:emit/cte:xNome')
+            vTPrest    = find_text(root, './/cte:vTPrest')
+            rem_xNome  = find_text(root, './/cte:rem/cte:xNome')
+            dest_xNome = find_text(root, './/cte:dest/cte:xNome')
+            dest_CNPJ  = find_text(root, './/cte:dest/cte:CNPJ')
+            dest_CPF   = find_text(root, './/cte:dest/cte:CPF')
+            documento_destinatario = dest_CNPJ or dest_CPF or 'N/A'
+            dest_xLgr   = find_text(root, './/cte:dest/cte:enderDest/cte:xLgr')
+            dest_nro    = find_text(root, './/cte:dest/cte:enderDest/cte:nro')
+            dest_xBairro= find_text(root, './/cte:dest/cte:enderDest/cte:xBairro')
+            dest_xMun   = find_text(root, './/cte:dest/cte:enderDest/cte:xMun')
+            dest_CEP    = find_text(root, './/cte:dest/cte:enderDest/cte:CEP')
+            dest_UF     = find_text(root, './/cte:dest/cte:enderDest/cte:UF')
+            endereco = ""
+            if dest_xLgr:
+                endereco += dest_xLgr
+                if dest_nro:    endereco += f", {dest_nro}"
+                if dest_xBairro:endereco += f" - {dest_xBairro}"
+                if dest_xMun:   endereco += f", {dest_xMun}"
+                if dest_UF:     endereco += f"/{dest_UF}"
+                if dest_CEP:    endereco += f" - CEP: {dest_CEP}"
+            if not endereco: endereco = "N/A"
+            infNFe_chave = find_text(root, './/cte:infNFe/cte:chave')
+            numero_nfe   = self.extract_nfe_number_from_key(infNFe_chave) if infNFe_chave else None
+            peso_bruto, tipo_peso = self.extract_peso_bruto(root)
+            data_fmt = None
+            if dhEmi:
+                for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d/%m/%y'):
+                    try:
+                        data_fmt = datetime.strptime(dhEmi[:10], fmt).strftime('%d/%m/%y')
+                        break
+                    except Exception:
+                        pass
+                if not data_fmt: data_fmt = dhEmi[:10]
+            try:    vTPrest = float(vTPrest) if vTPrest else 0.0
+            except: vTPrest = 0.0
+            return {
+                'Arquivo': filename, 'nCT': nCT or 'N/A',
+                'Data Emissão': data_fmt or dhEmi or 'N/A',
+                'Código Município Início': cMunIni or 'N/A',
+                'UF Início': UFIni or 'N/A',
+                'Código Município Fim': cMunFim or 'N/A',
+                'UF Fim': UFFim or 'N/A',
+                'Emitente': emit_xNome or 'N/A',
+                'Valor Prestação': vTPrest,
+                'Peso Bruto (kg)': peso_bruto,
+                'Tipo de Peso Encontrado': tipo_peso,
+                'Remetente': rem_xNome or 'N/A',
+                'Destinatário': dest_xNome or 'N/A',
+                'Documento Destinatário': documento_destinatario,
+                'Endereço Destinatário': endereco,
+                'Município Destino': dest_xMun or 'N/A',
+                'UF Destino': dest_UF or 'N/A',
+                'Chave NFe': infNFe_chave or 'N/A',
+                'Número NFe': numero_nfe or 'N/A',
+                'Data Processamento': datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
+            }
+        except Exception as e:
+            st.error(f"Erro ao extrair CT-e {filename}: {str(e)}")
+            return None
+
+    def process_single_file(self, uploaded_file):
+        try:
+            file_content = uploaded_file.getvalue()
+            filename     = uploaded_file.name
+            if not filename.lower().endswith('.xml'):
+                return False, "Arquivo não é XML"
+            content_str = file_content.decode('utf-8', errors='ignore')
+            if 'CTe' not in content_str and 'conhecimento' not in content_str.lower():
+                return False, "Arquivo não parece ser um CT-e"
+            data = self.extract_cte_data(content_str, filename)
+            if data:
+                self.processed_data.append(data)
+                return True, f"CT-e {filename} processado."
+            return False, f"Erro ao processar {filename}"
+        except Exception as e:
+            return False, f"Erro: {str(e)}"
+
+    def process_multiple_files(self, uploaded_files):
+        results = {'success': 0, 'errors': 0, 'messages': []}
+        pb = st.progress(0)
+        st_txt = st.empty()
+        for i, f in enumerate(uploaded_files):
+            st_txt.text(f"Processando {i+1}/{len(uploaded_files)}: {f.name}")
+            pb.progress((i + 1) / len(uploaded_files))
+            ok, msg = self.process_single_file(f)
+            if ok: results['success'] += 1
+            else:  results['errors']  += 1
+            results['messages'].append(msg)
+        pb.empty(); st_txt.empty()
+        return results
+
+    def get_dataframe(self):
+        return pd.DataFrame(self.processed_data) if self.processed_data else pd.DataFrame()
+
+    def clear_data(self):
+        self.processed_data = []
+
+
+# ==============================================================================
+# PARTE 2 — UI PROCESSADOR CT-E
+# ==============================================================================
+def processador_cte():
+    processor = CTeProcessorDirect()
+    page_header("🚚", "Processador de CT-e",
+                "Extrai dados de XML CT-e e gera planilha para Power BI")
+
+    tab_up, tab_dados, tab_exp = st.tabs(
+        ["📤  Upload", "📊  Dados & Análise", "📥  Exportar"])
+
+    # ── TAB UPLOAD ────────────────────────────────────────────────────────
+    with tab_up:
+        section_title("Modo de Upload")
+        modo = st.radio("Modo de upload", ["☝️ Individual", "📦 Em Lote"],
+                        horizontal=True)
+
+        if modo == "☝️ Individual":
+            col_u, col_i = st.columns([3, 2], gap="large")
+            with col_u:
+                ph('<p class="flabel">Arquivo XML CT-e</p>')
+                uploaded_file = st.file_uploader("Arquivo XML CT-e", type=['xml'],
+                                                 key="single_cte")
+            with col_i:
+                ph('<div class="ipill">🔍 Busca inteligente de peso</div>')
+                with st.expander("ℹ️ Campos reconhecidos"):
+                    st.markdown("1. **PESO BRUTO** — principal\n"
+                                "2. **PESO BASE DE CALCULO** — alt. 1\n"
+                                "3. **PESO BASE CÁLCULO** — alt. 2\n"
+                                "4. **PESO** — genérico")
+            if uploaded_file:
+                if st.button("📊 Processar CT-e", key="process_single",
+                             type="primary", use_container_width=True):
+                    show_loading_animation("Analisando XML...")
+                    show_processing_animation("Extraindo dados...")
+                    ok, msg = processor.process_single_file(uploaded_file)
+                    if ok:
+                        show_success_animation("CT-e processado!")
+                        df = processor.get_dataframe()
+                        if not df.empty:
+                            u = df.iloc[-1]
+                            r1, r2 = st.columns(2)
+                            r1.metric("⚖️ Peso", f"{u['Peso Bruto (kg)']} kg")
+                            r2.metric("🏷️ Tipo", u['Tipo de Peso Encontrado'])
+                    else:
+                        st.error(msg)
+        else:
+            ph('<p class="flabel">Múltiplos arquivos XML CT-e</p>')
+            uploaded_files = st.file_uploader("Arquivos XML CT-e", type=['xml'],
+                                              accept_multiple_files=True,
+                                              key="multiple_cte")
+            if uploaded_files:
+                ph(f'<div class="ipill">📎 {len(uploaded_files)} arquivo(s) selecionado(s)</div>')
+                if st.button("📊 Processar Todos", key="process_multiple",
+                             type="primary", use_container_width=True):
+                    show_loading_animation(f"Processando {len(uploaded_files)} arquivos...")
+                    results = processor.process_multiple_files(uploaded_files)
+                    show_success_animation("Lote concluído!")
+                    r1, r2 = st.columns(2)
+                    r1.metric("✅ Sucesso", results['success'])
+                    r2.metric("❌ Erros",   results['errors'])
+                    df = processor.get_dataframe()
+                    if not df.empty:
+                        k1, k2, k3 = st.columns(3)
+                        k1.metric("⚖️ Peso Total", f"{df['Peso Bruto (kg)'].sum():,.2f} kg")
+                        k2.metric("📈 Peso Médio",  f"{df['Peso Bruto (kg)'].mean():,.2f} kg")
+                        k3.metric("🏷️ Tipos",        df['Tipo de Peso Encontrado'].nunique())
+                    if results['errors'] > 0:
+                        with st.expander("⚠️ Erros detalhados"):
+                            for msg in results['messages']:
+                                if "Erro" in msg: st.warning(msg)
+
+        st.divider()
+        if st.button("🗑️ Limpar Dados", type="secondary", use_container_width=True):
+            processor.clear_data()
+            st.success("Dados limpos.")
+            time.sleep(0.8)
+            st.rerun()
+
+    # ── TAB DADOS ────────────────────────────────────────────────────────
+    with tab_dados:
+        df = processor.get_dataframe()
+        if not df.empty:
+            section_title("🔎 Filtros")
+            fc1, fc2, fc3 = st.columns(3)
+            with fc1:
+                uf_f = st.multiselect("UF Início",    options=df['UF Início'].unique())
+            with fc2:
+                uf_d = st.multiselect("UF Destino",   options=df['UF Destino'].unique())
+            with fc3:
+                tp_f = st.multiselect("Tipo de Peso", options=df['Tipo de Peso Encontrado'].unique())
+
+            pmin = float(df['Peso Bruto (kg)'].min())
+            pmax = float(df['Peso Bruto (kg)'].max())
+            pf   = st.slider("Faixa de Peso (kg)", pmin, pmax, (pmin, pmax),
+                             format="%.1f kg") if pmin < pmax else (pmin, pmax)
+
+            fdf = df.copy()
+            if uf_f: fdf = fdf[fdf['UF Início'].isin(uf_f)]
+            if uf_d: fdf = fdf[fdf['UF Destino'].isin(uf_d)]
+            if tp_f: fdf = fdf[fdf['Tipo de Peso Encontrado'].isin(tp_f)]
+            fdf = fdf[(fdf['Peso Bruto (kg)'] >= pf[0]) & (fdf['Peso Bruto (kg)'] <= pf[1])]
+
+            section_title("📊 Métricas")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("💰 Valor Total",    f"R$ {fdf['Valor Prestação'].sum():,.2f}")
+            m2.metric("⚖️ Peso Total",     f"{fdf['Peso Bruto (kg)'].sum():,.2f} kg")
+            m3.metric("📈 Peso Médio",     f"{fdf['Peso Bruto (kg)'].mean():,.2f} kg")
+            m4.metric("📋 CT-es",          len(fdf))
+
+            section_title("📋 Dados")
+            cols = ['Arquivo','nCT','Data Emissão','Emitente','Remetente',
+                    'Destinatário','UF Início','UF Destino','Peso Bruto (kg)',
+                    'Tipo de Peso Encontrado','Valor Prestação']
+            st.dataframe(fdf[cols], use_container_width=True, height=300)
+            with st.expander("📋 Todos os campos"):
+                st.dataframe(fdf, use_container_width=True)
+
+            section_title("📈 Análise Visual")
+            g1, g2 = st.columns(2)
+            with g1:
+                if not fdf.empty:
+                    tc = fdf['Tipo de Peso Encontrado'].value_counts()
+                    fig = px.pie(values=tc.values, names=tc.index,
+                                 title="Distribuição por Tipo de Peso",
+                                 color_discrete_sequence=px.colors.sequential.Blues_r,
+                                 hole=0.42)
+                    fig.update_layout(margin=dict(t=38,b=8,l=8,r=8),
+                                      legend=dict(orientation="h", y=-0.18))
+                    st.plotly_chart(fig, use_container_width=True)
+            with g2:
+                if not fdf.empty:
+                    fig2 = px.scatter(fdf, x='Peso Bruto (kg)', y='Valor Prestação',
+                                      color='Tipo de Peso Encontrado',
+                                      title="Peso vs Valor Prestação",
+                                      color_discrete_sequence=px.colors.qualitative.Set2)
+                    try:
+                        x = fdf['Peso Bruto (kg)'].values
+                        y = fdf['Valor Prestação'].values
+                        mask = ~np.isnan(x) & ~np.isnan(y)
+                        xc, yc = x[mask], y[mask]
+                        if len(xc) > 1:
+                            xs = np.linspace(xc.min(), xc.max(), 100)
+                            fig2.add_trace(go.Scatter(
+                                x=xs, y=np.poly1d(np.polyfit(xc, yc, 1))(xs),
+                                mode='lines', name='Tendência',
+                                line=dict(color='#EF4444', dash='dash'), opacity=.7))
+                    except Exception:
+                        pass
+                    fig2.update_layout(margin=dict(t=38,b=8,l=8,r=8),
+                                       legend=dict(orientation="h", y=-0.22))
+                    st.plotly_chart(fig2, use_container_width=True)
+        else:
+            empty_state("🚚", "Nenhum CT-e processado",
+                        "Vá para Upload e carregue arquivos XML")
+
+    # ── TAB EXPORTAR ──────────────────────────────────────────────────────
+    with tab_exp:
+        df = processor.get_dataframe()
+        if not df.empty:
+            section_title("💾 Exportar Dados")
+            cf, cc = st.columns([1, 2], gap="large")
+            with cf:
+                st.metric("📋 Registros", len(df))
+                fmt = st.radio("Formato", ["📊 Excel (.xlsx)", "📄 CSV (.csv)"])
+            with cc:
+                cols = st.multiselect("Colunas", options=df.columns.tolist(),
+                                      default=df.columns.tolist())
+            df_exp = df[cols] if cols else df
+            st.divider()
+            if "Excel" in fmt:
+                out = BytesIO()
+                with pd.ExcelWriter(out, engine='xlsxwriter') as w:
+                    df_exp.to_excel(w, sheet_name='Dados_CTe', index=False)
+                out.seek(0)
+                st.download_button("📥 Baixar Excel", data=out,
+                                   file_name="dados_cte.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   use_container_width=True)
+            else:
+                csv = df_exp.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Baixar CSV", data=csv,
+                                   file_name="dados_cte.csv", mime="text/csv",
+                                   use_container_width=True)
+            with st.expander("👁️ Prévia"):
+                st.dataframe(df_exp.head(10), use_container_width=True)
+        else:
+            empty_state("📥", "Nenhum dado disponível",
+                        "Processe CT-es na aba Upload primeiro")
+
+
+# ==============================================================================
+# PARTE 3A — PARSER EXTRATO DUIMP (layout antigo / HafelePDFParser)
+# ==============================================================================
+class HafelePDFParser:
+    """
+    Parser para o layout Extrato DUIMP (APP2 original).
+    Processa em lotes de _PDF_CHUNK_PAGES páginas para suportar PDFs
+    gigantes (1000+ páginas) sem travar por falta de memória.
+    O buffer de overlap garante que itens que cruzam a fronteira
+    entre lotes não sejam perdidos.
+    """
+
+    def __init__(self):
+        self.documento = {'cabecalho': {}, 'itens': [], 'totais': {}}
+        self._buffer   = ""
+
+    @staticmethod
+    def _parse_valor(v: str) -> float:
+        try:
+            return float(v.strip().replace('.','').replace(',','.')) if v else 0.0
+        except: return 0.0
+
+    def parse_pdf(self, pdf_path: str) -> Dict:
+        try:
+            prog_txt = st.empty()
+            prog_bar = st.progress(0)
+            items_found: list = []
+            self._buffer = ""
+
+            with pdfplumber.open(pdf_path) as pdf:
+                total = len(pdf.pages)
+                chunk = _PDF_CHUNK_PAGES
+
+                for start in range(0, total, chunk):
+                    end = min(start + chunk, total)
+                    prog_txt.text(
+                        f"Processando páginas {start+1}–{end} de {total} "
+                        f"(Extrato DUIMP)... {int((end/total)*100)}%"
+                    )
+                    prog_bar.progress(end / total)
+
+                    chunk_lines = []
+                    for page in pdf.pages[start:end]:
+                        t = page.extract_text(layout=False)
+                        if t: chunk_lines.append(t)
+
+                    chunk_text = self._buffer + "\n".join(chunk_lines)
+                    is_last    = (end == total)
+                    new_items, self._buffer = self._extract_items_from_chunk(
+                        chunk_text, is_last=is_last
+                    )
+                    items_found.extend(new_items)
+                    del chunk_lines, chunk_text
+                    gc.collect()
+
+            prog_txt.empty()
+            prog_bar.empty()
+
+            if self._buffer.strip():
+                new_items, _ = self._extract_items_from_chunk(self._buffer, is_last=True)
+                items_found.extend(new_items)
+
+            if not items_found:
+                st.warning("⚠️ Padrão 'ITENS DA DUIMP' não encontrado. Verifique o formato do PDF.")
+
+            self.documento['itens'] = items_found
+            self._calculate_totals()
+            return self.documento
+
+        except Exception as e:
+            logger.error(f"Erro HafelePDFParser: {e}")
+            st.error(f"Erro ao ler PDF: {str(e)}")
+            return self.documento
+
+    def _extract_items_from_chunk(self, text: str, is_last: bool):
+        """
+        Divide o chunk pelo padrão de item do Extrato DUIMP.
+        Retorna (itens_completos, buffer_residual).
+        """
+        pattern = r'(ITENS\s+DA\s+DUIMP\s*-\s*\d+)'
+        parts = re.split(pattern, text, flags=re.IGNORECASE)
+        items_found = []
+
+        if len(parts) <= 1:
+            return items_found, (text if not is_last else "")
+
+        n_complete = len(parts) - 1 if not is_last else len(parts)
+
+        for i in range(1, n_complete, 2):
+            header  = parts[i]
+            content = parts[i+1] if (i+1) < len(parts) else ''
+            m = re.search(r'(\d+)', header)
+            num = int(m.group(1)) if m else (i // 2)
+            item = self._parse_item_block(num, content)
+            if item: items_found.append(item)
+
+        if not is_last and len(parts) >= 2:
+            last_header  = parts[-2] if len(parts) % 2 == 0 else ""
+            last_content = parts[-1]
+            residual = last_header + last_content
+        else:
+            residual = ""
+
+        return items_found, residual
+
+    def _parse_item_block(self, item_num: int, text: str) -> Dict:
+        try:
+            pv = self._parse_valor
+            item = {
+                'numero_item': item_num, 'numeroAdicao': str(item_num).zfill(3),
+                'ncm':'', 'codigo_interno':'', 'nome_produto':'',
+                'quantidade':0.0, 'quantidade_comercial':0.0,
+                'peso_liquido':0.0, 'valor_total':0.0,
+                'ii_valor_devido':0.0,'ii_base_calculo':0.0,'ii_aliquota':0.0,
+                'ipi_valor_devido':0.0,'ipi_base_calculo':0.0,'ipi_aliquota':0.0,
+                'pis_valor_devido':0.0,'pis_base_calculo':0.0,'pis_aliquota':0.0,
+                'cofins_valor_devido':0.0,'cofins_base_calculo':0.0,'cofins_aliquota':0.0,
+                'frete_internacional':0.0,'seguro_internacional':0.0,
+                'local_aduaneiro':0.0,'aduaneiro_reais':0.0,'valorAduaneiroReal':0.0,
+                'paisOrigem':'','fornecedor_raw':'','endereco_raw':'',
+                'unidade':'UNIDADE','pesoLiq':'0','valorTotal':'0','valorUnit':'0',
+                'moeda':'EURO/COM.EUROPEIA',
+            }
+            m = re.search(r'Código interno\s*([\d\.]+)', text, re.IGNORECASE)
+            if m: item['codigo_interno'] = m.group(1).replace('.','')
+            m = re.search(r'(\d{4}\.\d{2}\.\d{2})', text)
+            if m: item['ncm'] = m.group(1).replace('.','')
+            m = re.search(r'Qtde Unid\. Comercial\s*([\d\.,]+)', text)
+            if m: item['quantidade_comercial'] = pv(m.group(1))
+            m = re.search(r'Qtde Unid\. Estatística\s*([\d\.,]+)', text)
+            item['quantidade'] = pv(m.group(1)) if m else item['quantidade_comercial']
+            m = re.search(r'Valor Tot\. Cond Venda\s*([\d\.,]+)', text)
+            if m: item['valor_total'] = pv(m.group(1)); item['valorTotal'] = m.group(1)
+            m = re.search(r'Peso Líquido \(KG\)\s*([\d\.,]+)', text, re.IGNORECASE)
+            if m: item['peso_liquido'] = pv(m.group(1)); item['pesoLiq'] = m.group(1)
+            m = re.search(r'Frete Internac\. \(R\$\)\s*([\d\.,]+)', text)
+            if m: item['frete_internacional'] = pv(m.group(1))
+            m = re.search(r'Seguro Internac\. \(R\$\)\s*([\d\.,]+)', text)
+            if m: item['seguro_internacional'] = pv(m.group(1))
+            m = re.search(r'Local Aduaneiro \(R\$\)\s*([\d\.,]+)', text)
+            if m:
+                item['local_aduaneiro'] = pv(m.group(1))
+                item['aduaneiro_reais'] = item['local_aduaneiro']
+                item['valorAduaneiroReal'] = item['local_aduaneiro']
+            tax_pats = re.findall(
+                r'Base de Cálculo.*?\(R\$\)\s*([\d\.,]+).*?% Alíquota\s*([\d\.,]+).*?Valor.*?(?:Devido|A Recolher|Calculado).*?\(R\$\)\s*([\d\.,]+)',
+                text, re.DOTALL | re.IGNORECASE)
+            for base_s, aliq_s, val_s in tax_pats:
+                base = pv(base_s); aliq = pv(aliq_s); val = pv(val_s)
+                if 1.60<=aliq<=3.00:
+                    item['pis_aliquota']=aliq; item['pis_base_calculo']=base; item['pis_valor_devido']=val
+                elif 7.00<=aliq<=12.00:
+                    item['cofins_aliquota']=aliq; item['cofins_base_calculo']=base; item['cofins_valor_devido']=val
+                elif aliq>12.00:
+                    item['ii_aliquota']=aliq; item['ii_base_calculo']=base; item['ii_valor_devido']=val
+                elif aliq>=0 and item['ipi_aliquota']==0:
+                    item['ipi_aliquota']=aliq; item['ipi_base_calculo']=base; item['ipi_valor_devido']=val
+            item['total_impostos']=(item['ii_valor_devido']+item['ipi_valor_devido']
+                                    +item['pis_valor_devido']+item['cofins_valor_devido'])
+            item['valor_total_com_impostos']=item['valor_total']+item['total_impostos']
+            return item
+        except Exception as e:
+            logger.error(f"Erro item {item_num}: {e}"); return None
+
+    def _calculate_totals(self):
+        if self.documento['itens']:
+            itens = self.documento['itens']
+            self.documento['totais'] = {
+                'valor_total_mercadoria': sum(i['valor_total'] for i in itens),
+                'total_valor_aduaneiro':  sum(i.get('aduaneiro_reais',0) for i in itens),
+                'total_ii':     sum(i['ii_valor_devido'] for i in itens),
+                'total_ipi':    sum(i['ipi_valor_devido'] for i in itens),
+                'total_pis':    sum(i['pis_valor_devido'] for i in itens),
+                'total_cofins': sum(i['cofins_valor_devido'] for i in itens),
+                'total_frete':  sum(i['frete_internacional'] for i in itens),
+                'total_seguro': sum(i['seguro_internacional'] for i in itens),
+                'quantidade_adicoes': len(itens),
+            }
+
+
+# ==============================================================================
+# PARTE 3B — PARSER SIGRAWEB (layout novo)
+# ==============================================================================
+class SigrawebPDFParser:
+    """
+    Parser para o layout Sigraweb — Conferência do Processo Detalhado.
+    Processa em lotes de _PDF_CHUNK_PAGES páginas.
+    Fase 1: extrai cabeçalho das 2 primeiras páginas.
+    Fase 2: processa adições em chunks liberando memória a cada lote.
+    """
+
+    def __init__(self):
+        self.documento = {'cabecalho': {}, 'itens': [], 'totais': {}}
+
+    @staticmethod
+    def _parse_valor(v: str) -> float:
+        try:
+            return float(str(v).strip().replace('.','').replace(',','.')) if v else 0.0
+        except: return 0.0
+
+    @staticmethod
+    def _fmt_date(d: str) -> str:
+        try:
+            return datetime.strptime(d.strip(), '%d/%m/%Y').strftime('%Y%m%d')
+        except:
+            return d.replace('/','').replace('-','')[:8]
+
+    def parse_pdf(self, pdf_path: str) -> Dict:
+        try:
+            prog_txt = st.empty()
+            prog_bar = st.progress(0)
+            items_found: list = []
+            buffer = ""
+
+            with pdfplumber.open(pdf_path) as pdf:
+                total = len(pdf.pages)
+                chunk = _PDF_CHUNK_PAGES
+
+                # Fase 1: cabeçalho (primeiras 2 páginas)
+                p1 = pdf.pages[0].extract_text(layout=False) or "" if total > 0 else ""
+                p2 = pdf.pages[1].extract_text(layout=False) or "" if total > 1 else ""
+                self._extract_header(p1, p2)
+                del p1, p2
+
+                # Fase 2: adições em chunks
+                for start in range(0, total, chunk):
+                    end = min(start + chunk, total)
+                    prog_txt.text(
+                        f"Processando páginas {start+1}–{end} de {total} "
+                        f"(Sigraweb)... {int((end/total)*100)}%"
+                    )
+                    prog_bar.progress(end / total)
+
+                    chunk_pages = []
+                    for page in pdf.pages[start:end]:
+                        t = page.extract_text(layout=False)
+                        if t: chunk_pages.append(t)
+
+                    chunk_text = buffer + "\n".join(chunk_pages)
+                    is_last    = (end == total)
+                    new_items, buffer = self._extract_items_from_chunk(
+                        chunk_text, is_last=is_last
+                    )
+                    items_found.extend(new_items)
+                    del chunk_pages, chunk_text
+                    gc.collect()
+
+            prog_txt.empty()
+            prog_bar.empty()
+
+            if buffer.strip():
+                new_items, _ = self._extract_items_from_chunk(buffer, is_last=True)
+                items_found.extend(new_items)
+
+            if not items_found:
+                st.warning("⚠️ Nenhuma adição detectada no PDF Sigraweb.")
+
+            self.documento['itens'] = items_found
+            self._calculate_totals()
+            return self.documento
+
+        except Exception as e:
+            logger.error(f"Erro SigrawebPDFParser: {e}")
+            st.error(f"Erro ao ler PDF Sigraweb: {str(e)}")
+            return self.documento
+
+    def _extract_items_from_chunk(self, text: str, is_last: bool):
+        """
+        Divide o chunk pelo padrão de adição do Sigraweb.
+        Retorna (itens_completos, buffer_residual).
+        """
+        pattern = r'Informações da Adição Nº:\s*(\d+)'
+        parts   = re.split(pattern, text)
+        items_found = []
+
+        if len(parts) <= 1:
+            return items_found, (text if not is_last else "")
+
+        n_complete = len(parts) - 1 if not is_last else len(parts)
+
+        for i in range(1, n_complete, 2):
+            num_str = parts[i].strip()
+            content = parts[i+1] if (i+1) < len(parts) else ''
+            item    = self._parse_item_block(num_str, content)
+            if item: items_found.append(item)
+
+        if not is_last and len(parts) >= 2:
+            last_num     = parts[-2] if len(parts) % 2 == 0 else ""
+            last_content = parts[-1]
+            residual = (f"Informações da Adição Nº: {last_num}\n"
+                        if last_num else "") + last_content
+        else:
+            residual = ""
+
+        return items_found, residual
+
+    def _extract_header(self, p1: str, p2: str):
+        def _f(pat, text, default=''):
+            m = re.search(pat, text)
+            return m.group(1).strip() if m else default
+        h = {}
+        h['numeroDI']       = _f(r'Número DI:\s*([\w]+)', p1)
+        h['sigraweb']       = _f(r'SIGRAWEB:\s*([\w]+)', p1)
+        h['cnpj']           = _f(r'CNPJ:\s*([\d\.\/\-]+)', p1)
+        h['nomeImportador'] = _f(r'Nome da Empresa:\s*(.+?)(?:\n|CNPJ)', p1)
+        dr = _f(r'Data Registro:([\d\-T:\.+]+)', p1)
+        h['dataRegistro']   = dr[:10].replace('-','') if dr else ''
+        h['pesoBruto']      = _f(r'Peso Bruto:([\d\.,]+)', p1)
+        h['pesoLiquido']    = _f(r'Peso Líquido:([\d\.,]+)', p1)
+        h['volumes']        = _f(r'Volumes:([\d]+)', p1)
+        h['embalagem']      = _f(r'Embalagem:(\w+)', p1)
+        h['urf']            = _f(r'URF de Entrada:\s*(\d+)', p1, '0917900')
+        h['urfDespacho']    = _f(r'URF de Despacho:\s*(\d+)', p1, '0917900')
+        h['modalidade']     = _f(r'Modalidade de Despacho:\s*(.+?)(?:\n)', p1, 'Normal')
+        h['viaTransporte']  = _f(r'Via Transporte:\s*(.+?)(?:\n)', p1, 'Aéreo')
+        pais_raw = _f(r'País de Procedência:\s*\d+\s*(.+?)(?:\n|Local|Incoterms)', p1)
+        h['paisProcedencia']= pais_raw.strip() if pais_raw else 'Alemanha'
+        h['localEmbarque']  = _f(r'Local de Embarque:\s*(.+?)(?:\n|Data)', p1)
+        h['dataEmbarque']   = _f(r'Data de Embarque:\s*([\d\/]+)', p1)
+        h['dataChegada']    = _f(r'Data de Chegada no Brasil:\s*([\d\/]+)', p1)
+        h['incoterms']      = _f(r'Incoterms:\s*(\w+)', p1, 'FCA')
+        h['idtConhecimento']= _f(r'IDT\. Conhecimento:\s*([\w]+)', p1)
+        h['idtMaster']      = _f(r'IDT\. Master:\s*([\w]+)', p1)
+        h['transportador']  = _f(r'Transportador:\s*(.+?)(?:\n|Agente)', p1)
+        h['agenteCarga']    = _f(r'Agente de Carga:\s*(.+?)(?:\n|CE)', p1)
+        combined = p1 + "\n" + p2
+        h['taxaEUR']  = _f(r'Taxa EUR:\s*([\d\.,]+)', combined)
+        h['taxaDolar']= _f(r'Taxa do Dólar:\s*([\d\.,]+)', combined)
+        h['fobEUR']   = _f(r'FOB:\s*([\d\.,]+)\s*\(EUR\)', combined)
+        h['fobUSD']   = _f(r'FOB:.*?\(EUR\)\s*;\s*([\d\.,]+)\s*\(USD\)', combined)
+        h['fobBRL']   = _f(r'FOB:.*?\(USD\);\s*([\d\.,]+)\s*\(BRL\)', combined)
+        h['freteEUR'] = _f(r'Frete:\s*([\d\.,]+)\s*\(EUR\)', combined)
+        h['freteUSD'] = _f(r'Frete:.*?\(EUR\)\s*;\s*([\d\.,]+)\s*\(USD\)', combined)
+        h['freteBRL'] = _f(r'Frete:.*?\(USD\);\s*([\d\.,]+)\s*\(BRL\)', combined)
+        h['seguroUSD']= _f(r'Seguro:\s*([\d\.,]+)\s*\(USD\)', combined)
+        h['seguroBRL']= _f(r'Seguro:.*?;\s*([\d\.,]+)\s*\(BRL\)', combined)
+        h['cifUSD']   = _f(r'CIF:\s*([\d\.,]+)\s*\(USD\)', combined)
+        h['cifBRL']   = _f(r'CIF:.*?;\s*([\d\.,]+)\s*\(BRL\)', combined)
+        h['valorAduaneiroUSD'] = _f(r'Valor Aduaneiro:\s*([\d\.,]+)\s*\(USD\)', combined)
+        h['valorAduaneiroBRL'] = _f(r'Valor Aduaneiro:.*?;\s*([\d\.,]+)\s*\(BRL\)', combined)
+        tm = re.search(
+            r'([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+Itau\s+(\d+)\s+([\d\-]+)',
+            p1)
+        if tm:
+            h['totalII']=tm.group(1); h['totalIPI']=tm.group(2)
+            h['totalPIS']=tm.group(3); h['totalCOFINS']=tm.group(4)
+            h['totalSiscomex']=tm.group(5); h['banco']='Itau'
+            h['agencia']=tm.group(6); h['conta']=tm.group(7)
+        else:
+            h['totalII']=h['totalIPI']=h['totalPIS']=h['totalCOFINS']='0'
+            h['totalSiscomex']='0'
+            h['banco']  = _f(r'Banco:\s*(\w+)', p2, 'Itau')
+            h['agencia']= _f(r'Agência:\s*([\d]+)', p2, '3715')
+            h['conta']  = _f(r'Conta Corrente:\s*([\w\-]+)', p2, '')
+        h['dataEmbarqueISO'] = self._fmt_date(h['dataEmbarque']) if h['dataEmbarque'] else ''
+        h['dataChegadaISO']  = self._fmt_date(h['dataChegada'])  if h['dataChegada']  else ''
+        self.documento['cabecalho'] = h
+
+    def _parse_item_block(self, num_str: str, text: str) -> Optional[Dict]:
+        try:
+            pv = self._parse_valor
+            item = {
+                'numero_item': int(num_str), 'numeroAdicao': num_str.zfill(3),
+                'ncm':'', 'codigo_interno':'', 'descricao':'',
+                'paisOrigem':'', 'fornecedor_raw':'HAFELE SE & CO KG', 'endereco_raw':'',
+                'quantidade':'0', 'quantidade_comercial':'0', 'unidade':'PECA',
+                'pesoLiq':'0', 'valorTotal':'0', 'valorUnit':'0',
+                'valorAduaneiroReal':0.0, 'valorAduaneiroUSD':0.0, 'aduaneiro_reais':0.0,
+                'moeda':'EURO/COM.EUROPEIA',
+                'freteUSD':0.0,'freteReal':0.0,'seguroUSD':0.0,'seguroReal':0.0,
+                'frete_internacional':0.0,'seguro_internacional':0.0,'local_aduaneiro':0.0,
+                'ii_aliquota':0.0,'ii_base_calculo':0.0,'ii_valor_devido':0.0,
+                'ipi_aliquota':0.0,'ipi_base_calculo':0.0,'ipi_valor_devido':0.0,
+                'pis_aliquota':0.0,'pis_base_calculo':0.0,'pis_valor_devido':0.0,
+                'cofins_aliquota':0.0,'cofins_base_calculo':0.0,'cofins_valor_devido':0.0,
+            }
+            m = re.search(r'NR NCM:\s*(\d+)', text)
+            if m: item['ncm'] = m.group(1)
+            m = re.search(r'Part Number:\s*([\S]+)\s*\|\s*Descrição:\s*(.+?)(?=\nFabricante:|$)',
+                          text, re.DOTALL)
+            if m:
+                item['codigo_interno'] = m.group(1).strip()
+                item['descricao']      = re.sub(r'\s+',' ', m.group(2).strip())
+            else:
+                m2 = re.search(r'Descrição:\s*(.+?)(?=\nFabricante:|$)', text, re.DOTALL)
+                if m2: item['descricao'] = re.sub(r'\s+',' ', m2.group(1).strip())
+            m = re.search(r'Peso Líquido:\s*([\d\.,]+)', text)
+            if m: item['pesoLiq'] = m.group(1)
+            m = re.search(r'Qnt\. Estatística:\s*([\d\.,]+)', text)
+            if m: item['quantidade'] = m.group(1)
+            m = re.search(r'Quantidade:\s*([\d\.,]+)\s+Unidade:', text)
+            item['quantidade_comercial'] = m.group(1) if m else item['quantidade']
+            m = re.search(r'Unidade:\s*(\S+)', text)
+            if m: item['unidade'] = m.group(1).upper()
+            m = re.search(r'Valor FOB:\s*([\d\.,]+)\s+EUR', text)
+            if m: item['valorTotal'] = m.group(1)
+            m = re.search(r'Valor Unitário:\s*([\d\.,]+)', text)
+            if m: item['valorUnit'] = m.group(1)
+            m = re.search(r'Valor Aduaneiro USD:\s*([\d\.,]+)', text)
+            if m: item['valorAduaneiroUSD'] = pv(m.group(1))
+            m = re.search(r'Valor Aduaneiro Real:\s*([\d\.,]+)', text)
+            if m:
+                item['valorAduaneiroReal'] = pv(m.group(1))
+                item['aduaneiro_reais']    = pv(m.group(1))
+                item['ii_base_calculo']    = pv(m.group(1))
+            m = re.search(r'Valor Frete:\s*([\d\.,]+)\s+USD', text)
+            if m: item['freteUSD'] = pv(m.group(1))
+            m = re.search(r'Valor Frete Real:\s*([\d\.,]+)', text)
+            if m: item['freteReal'] = pv(m.group(1)); item['frete_internacional'] = item['freteReal']
+            m = re.search(r'Valor Seguro:\s*([\d\.,]+)\s+USD', text)
+            if m: item['seguroUSD'] = pv(m.group(1))
+            m = re.search(r'Valor Seguro Real:\s*([\d\.,]+)', text)
+            if m: item['seguroReal'] = pv(m.group(1)); item['seguro_internacional'] = item['seguroReal']
+            m = re.search(r'Moeda LI:\s*(.+?)(?:\n|Valor)', text)
+            if m: item['moeda'] = m.group(1).strip()
+            m = re.search(r'País Origem:\s*(.+?)(?:\n|Fabricante)', text)
+            if m: item['paisOrigem'] = m.group(1).strip()
+            m = re.search(r'Fornecedor:\s*(.+?)(?:\n|País)', text)
+            if m: item['fornecedor_raw'] = m.group(1).strip()
+            # Tributos — II (7 cols), IPI/PIS/COFINS (6 cols)
+            m = re.search(r'^II\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
+                          text, re.MULTILINE)
+            if m: item['ii_aliquota']=pv(m.group(1)); item['ii_base_calculo']=pv(m.group(2)); item['ii_valor_devido']=pv(m.group(3))
+            m = re.search(r'^IPI\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
+                          text, re.MULTILINE)
+            if m: item['ipi_aliquota']=pv(m.group(1)); item['ipi_base_calculo']=pv(m.group(2)); item['ipi_valor_devido']=pv(m.group(3))
+            m = re.search(r'^PIS\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
+                          text, re.MULTILINE)
+            if m: item['pis_aliquota']=pv(m.group(1)); item['pis_base_calculo']=pv(m.group(2)); item['pis_valor_devido']=pv(m.group(3))
+            m = re.search(r'^COFINS\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
+                          text, re.MULTILINE)
+            if m: item['cofins_aliquota']=pv(m.group(1)); item['cofins_base_calculo']=pv(m.group(2)); item['cofins_valor_devido']=pv(m.group(3))
+            item['total_impostos'] = (item['ii_valor_devido']+item['ipi_valor_devido']
+                                      +item['pis_valor_devido']+item['cofins_valor_devido'])
+            item['valor_total_com_impostos'] = pv(str(item['valorTotal']))+item['total_impostos']
+            return item
+        except Exception as e:
+            logger.error(f"Erro item {num_str}: {e}"); return None
+
+    def _calculate_totals(self):
+        if self.documento['itens']:
+            pv = self._parse_valor
+            itens = self.documento['itens']
+            self.documento['totais'] = {
+                'valor_total_fob':       sum(pv(str(i.get('valorTotal',0))) for i in itens),
+                'peso_liquido_total':    sum(pv(str(i.get('pesoLiq',0))) for i in itens),
+                'total_valor_aduaneiro': sum(i.get('aduaneiro_reais',0) for i in itens),
+                'total_ii':    sum(i.get('ii_valor_devido',0) for i in itens),
+                'total_ipi':   sum(i.get('ipi_valor_devido',0) for i in itens),
+                'total_pis':   sum(i.get('pis_valor_devido',0) for i in itens),
+                'total_cofins':sum(i.get('cofins_valor_devido',0) for i in itens),
+                'total_frete': sum(i.get('frete_internacional',0) for i in itens),
+                'total_seguro':sum(i.get('seguro_internacional',0) for i in itens),
+                'quantidade_adicoes': len(itens),
+            }
+
+
+# ==============================================================================
+# PARTE 4 — montar_descricao_final + DuimpPDFParser
+# ==============================================================================
+def montar_descricao_final(desc_complementar, codigo_extra, detalhamento):
+    return f"{str(desc_complementar).strip()} - {str(codigo_extra).strip()} - {str(detalhamento).strip()}"
+
+
+class DuimpPDFParser:
+    """
+    Parser do App 1 (Extrato DUIMP / Siscomex).
+    CORREÇÃO DE MEMÓRIA:
+    - Recebe path em disco (não bytes em RAM) → zero cópia dupla do PDF
+    - Processa em lotes de _PDF_CHUNK_PAGES páginas via fitz
+    """
+    def __init__(self, pdf_path: str):
+        self.pdf_path  = pdf_path   # path em disco — não bytes em memória
+        self.full_text = ""
+        self.header    = {}
+        self.items     = []
+
+    def preprocess(self):
+        """
+        Lê páginas em chunks, filtra ruído e acumula texto limpo.
+        Usa fitz.open(path) — sem cópia do PDF em RAM.
+        """
+        prog_txt = st.empty()
+        prog_bar = st.progress(0)
+        doc      = fitz.open(self.pdf_path)     # path, não stream
+        total    = doc.page_count
+        parts    = []
+
+        for start in range(0, total, _PDF_CHUNK_PAGES):
+            end = min(start + _PDF_CHUNK_PAGES, total)
+            prog_txt.text(f"Pré-processando páginas {start+1}–{end} de {total} (DUIMP)...")
+            prog_bar.progress(end / total)
+
+            chunk_lines = []
+            for idx in range(start, end):
+                page = doc[idx]
+                for line in page.get_text("text").split('\n'):
+                    ls = line.strip()
+                    if "Extrato da DUIMP" in ls: continue
+                    if "Data, hora e responsável" in ls: continue
+                    if re.match(r'^\d+\s*/\s*\d+$', ls): continue
+                    chunk_lines.append(line)
+                page = None  # libera ref da página
+
+            parts.append("\n".join(chunk_lines))
+            del chunk_lines
+            gc.collect()
+
+        doc.close()
+        prog_txt.empty()
+        prog_bar.empty()
+
+        self.full_text = "\n".join(parts)
+        del parts
+        gc.collect()
+
+    def extract_header(self):
+        t = self.full_text
+        self.header["numeroDUIMP"]    = self._r(r"Extrato da Duimp\s+([\w\-\/]+)", t)
+        self.header["cnpj"]           = self._r(r"CNPJ do importador:\s*([\d\.\/\-]+)", t)
+        self.header["nomeImportador"] = self._r(r"Nome do importador:\s*\n?(.+)", t)
+        self.header["pesoBruto"]      = self._r(r"Peso Bruto \(kg\):\s*([\d\.,]+)", t)
+        self.header["pesoLiquido"]    = self._r(r"Peso Liquido \(kg\):\s*([\d\.,]+)", t)
+        self.header["urf"]            = self._r(r"Unidade de despacho:\s*([\d]+)", t)
+        self.header["paisProcedencia"]= self._r(r"País de Procedência:\s*\n?(.+)", t)
+
+    def extract_items(self):
+        chunks = re.split(r"Item\s+(\d+)", self.full_text)
+        if len(chunks) > 1:
+            for i in range(1, len(chunks), 2):
+                num = chunks[i]; content = chunks[i+1]
+                item = {"numeroAdicao": num}
+                item["ncm"]        = self._r(r"NCM:\s*([\d\.]+)", content)
+                item["paisOrigem"] = self._r(r"País de origem:\s*\n?(.+)", content)
+                item["quantidade"] = self._r(r"Quantidade na unidade estatística:\s*([\d\.,]+)", content)
+                item["quantidade_comercial"] = self._r(r"Quantidade na unidade comercializada:\s*([\d\.,]+)", content)
+                item["unidade"]    = self._r(r"Unidade estatística:\s*(.+)", content)
+                item["pesoLiq"]    = self._r(r"Peso líquido \(kg\):\s*([\d\.,]+)", content)
+                item["valorUnit"]  = self._r(r"Valor unitário na condição de venda:\s*([\d\.,]+)", content)
+                item["valorTotal"] = self._r(r"Valor total na condição de venda:\s*([\d\.,]+)", content)
+                item["moeda"]      = self._r(r"Moeda negociada:\s*(.+)", content)
+                m = re.search(r"Código do Exportador Estrangeiro:\s*(.+?)(?=\n\s*(?:Endereço|Dados))",
+                              content, re.DOTALL)
+                item["fornecedor_raw"] = m.group(1).strip() if m else ""
+                m = re.search(r"Endereço:\s*(.+?)(?=\n\s*(?:Dados da Mercadoria|Aplicação))",
+                              content, re.DOTALL)
+                item["endereco_raw"] = m.group(1).strip() if m else ""
+                m = re.search(r"Detalhamento do Produto:\s*(.+?)(?=\n\s*(?:Número de Identificação|Versão|Código de Class|Descrição complementar))",
+                              content, re.DOTALL)
+                item["descricao"] = m.group(1).strip() if m else ""
+                m = re.search(r"Descrição complementar da mercadoria:\s*(.+?)(?=\n|$)",
+                              content, re.DOTALL)
+                item["desc_complementar"] = m.group(1).strip() if m else ""
+                self.items.append(item)
+
+    def _r(self, pat, text):
+        m = re.search(pat, text)
+        return m.group(1).strip() if m else ""
+
+
+# ==============================================================================
+# PARTE 5 — ADICAO_FIELDS_ORDER, FOOTER_TAGS, DataFormatter, XMLBuilder
+# ==============================================================================
+ADICAO_FIELDS_ORDER = [
+    {"tag":"acrescimo","type":"complex","children":[
+        {"tag":"codigoAcrescimo","default":"17"},
+        {"tag":"denominacao","default":"OUTROS ACRESCIMOS AO VALOR ADUANEIRO"},
+        {"tag":"moedaNegociadaCodigo","default":"978"},
+        {"tag":"moedaNegociadaNome","default":"EURO/COM.EUROPEIA"},
+        {"tag":"valorMoedaNegociada","default":"000000000000000"},
+        {"tag":"valorReais","default":"000000000000000"},
+    ]},
+    {"tag":"cideValorAliquotaEspecifica","default":"00000000000"},
+    {"tag":"cideValorDevido","default":"000000000000000"},
+    {"tag":"cideValorRecolher","default":"000000000000000"},
+    {"tag":"codigoRelacaoCompradorVendedor","default":"3"},
+    {"tag":"codigoVinculoCompradorVendedor","default":"1"},
+    {"tag":"cofinsAliquotaAdValorem","default":"00965"},
+    {"tag":"cofinsAliquotaEspecificaQuantidadeUnidade","default":"000000000"},
+    {"tag":"cofinsAliquotaEspecificaValor","default":"0000000000"},
+    {"tag":"cofinsAliquotaReduzida","default":"00000"},
+    {"tag":"cofinsAliquotaValorDevido","default":"000000000000000"},
+    {"tag":"cofinsAliquotaValorRecolher","default":"000000000000000"},
+    {"tag":"condicaoVendaIncoterm","default":"FCA"},
+    {"tag":"condicaoVendaLocal","default":""},
+    {"tag":"condicaoVendaMetodoValoracaoCodigo","default":"01"},
+    {"tag":"condicaoVendaMetodoValoracaoNome","default":"METODO 1 - ART. 1 DO ACORDO (DECRETO 92930/86)"},
+    {"tag":"condicaoVendaMoedaCodigo","default":"978"},
+    {"tag":"condicaoVendaMoedaNome","default":"EURO/COM.EUROPEIA"},
+    {"tag":"condicaoVendaValorMoeda","default":"000000000000000"},
+    {"tag":"condicaoVendaValorReais","default":"000000000000000"},
+    {"tag":"dadosCambiaisCoberturaCambialCodigo","default":"1"},
+    {"tag":"dadosCambiaisCoberturaCambialNome","default":"COM COBERTURA CAMBIAL E PAGAMENTO FINAL A PRAZO DE ATE' 180"},
+    {"tag":"dadosCambiaisInstituicaoFinanciadoraCodigo","default":"00"},
+    {"tag":"dadosCambiaisInstituicaoFinanciadoraNome","default":"N/I"},
+    {"tag":"dadosCambiaisMotivoSemCoberturaCodigo","default":"00"},
+    {"tag":"dadosCambiaisMotivoSemCoberturaNome","default":"N/I"},
+    {"tag":"dadosCambiaisValorRealCambio","default":"000000000000000"},
+    {"tag":"dadosCargaPaisProcedenciaCodigo","default":"000"},
+    {"tag":"dadosCargaUrfEntradaCodigo","default":"0000000"},
+    {"tag":"dadosCargaViaTransporteCodigo","default":"01"},
+    {"tag":"dadosCargaViaTransporteNome","default":"MARÍTIMA"},
+    {"tag":"dadosMercadoriaAplicacao","default":"REVENDA"},
+    {"tag":"dadosMercadoriaCodigoNaladiNCCA","default":"0000000"},
+    {"tag":"dadosMercadoriaCodigoNaladiSH","default":"00000000"},
+    {"tag":"dadosMercadoriaCodigoNcm","default":"00000000"},
+    {"tag":"dadosMercadoriaCondicao","default":"NOVA"},
+    {"tag":"dadosMercadoriaDescricaoTipoCertificado","default":"Sem Certificado"},
+    {"tag":"dadosMercadoriaIndicadorTipoCertificado","default":"1"},
+    {"tag":"dadosMercadoriaMedidaEstatisticaQuantidade","default":"00000000000000"},
+    {"tag":"dadosMercadoriaMedidaEstatisticaUnidade","default":"UNIDADE"},
+    {"tag":"dadosMercadoriaNomeNcm","default":"DESCRIÇÃO PADRÃO NCM"},
+    {"tag":"dadosMercadoriaPesoLiquido","default":"000000000000000"},
+    {"tag":"dcrCoeficienteReducao","default":"00000"},
+    {"tag":"dcrIdentificacao","default":"00000000"},
+    {"tag":"dcrValorDevido","default":"000000000000000"},
+    {"tag":"dcrValorDolar","default":"000000000000000"},
+    {"tag":"dcrValorReal","default":"000000000000000"},
+    {"tag":"dcrValorRecolher","default":"000000000000000"},
+    {"tag":"fornecedorCidade","default":""},
+    {"tag":"fornecedorLogradouro","default":""},
+    {"tag":"fornecedorNome","default":""},
+    {"tag":"fornecedorNumero","default":""},
+    {"tag":"freteMoedaNegociadaCodigo","default":"978"},
+    {"tag":"freteMoedaNegociadaNome","default":"EURO/COM.EUROPEIA"},
+    {"tag":"freteValorMoedaNegociada","default":"000000000000000"},
+    {"tag":"freteValorReais","default":"000000000000000"},
+    {"tag":"iiAcordoTarifarioTipoCodigo","default":"0"},
+    {"tag":"iiAliquotaAcordo","default":"00000"},
+    {"tag":"iiAliquotaAdValorem","default":"00000"},
+    {"tag":"iiAliquotaPercentualReducao","default":"00000"},
+    {"tag":"iiAliquotaReduzida","default":"00000"},
+    {"tag":"iiAliquotaValorCalculado","default":"000000000000000"},
+    {"tag":"iiAliquotaValorDevido","default":"000000000000000"},
+    {"tag":"iiAliquotaValorRecolher","default":"000000000000000"},
+    {"tag":"iiAliquotaValorReduzido","default":"000000000000000"},
+    {"tag":"iiBaseCalculo","default":"000000000000000"},
+    {"tag":"iiFundamentoLegalCodigo","default":"00"},
+    {"tag":"iiMotivoAdmissaoTemporariaCodigo","default":"00"},
+    {"tag":"iiRegimeTributacaoCodigo","default":"1"},
+    {"tag":"iiRegimeTributacaoNome","default":"RECOLHIMENTO INTEGRAL"},
+    {"tag":"ipiAliquotaAdValorem","default":"00000"},
+    {"tag":"ipiAliquotaEspecificaCapacidadeRecipciente","default":"00000"},
+    {"tag":"ipiAliquotaEspecificaQuantidadeUnidadeMedida","default":"000000000"},
+    {"tag":"ipiAliquotaEspecificaTipoRecipienteCodigo","default":"00"},
+    {"tag":"ipiAliquotaEspecificaValorUnidadeMedida","default":"0000000000"},
+    {"tag":"ipiAliquotaNotaComplementarTIPI","default":"00"},
+    {"tag":"ipiAliquotaReduzida","default":"00000"},
+    {"tag":"ipiAliquotaValorDevido","default":"000000000000000"},
+    {"tag":"ipiAliquotaValorRecolher","default":"000000000000000"},
+    {"tag":"ipiRegimeTributacaoCodigo","default":"4"},
+    {"tag":"ipiRegimeTributacaoNome","default":"SEM BENEFICIO"},
+    {"tag":"mercadoria","type":"complex","children":[
+        {"tag":"descricaoMercadoria","default":""},
+        {"tag":"numeroSequencialItem","default":"01"},
+        {"tag":"quantidade","default":"00000000000000"},
+        {"tag":"unidadeMedida","default":"UNIDADE"},
+        {"tag":"valorUnitario","default":"00000000000000000000"},
+    ]},
+    {"tag":"numeroAdicao","default":"001"},
+    {"tag":"numeroDUIMP","default":""},
+    {"tag":"numeroLI","default":"0000000000"},
+    {"tag":"paisAquisicaoMercadoriaCodigo","default":"000"},
+    {"tag":"paisAquisicaoMercadoriaNome","default":""},
+    {"tag":"paisOrigemMercadoriaCodigo","default":"000"},
+    {"tag":"paisOrigemMercadoriaNome","default":""},
+    {"tag":"pisCofinsBaseCalculoAliquotaICMS","default":"00000"},
+    {"tag":"pisCofinsBaseCalculoFundamentoLegalCodigo","default":"00"},
+    {"tag":"pisCofinsBaseCalculoPercentualReducao","default":"00000"},
+    {"tag":"pisCofinsBaseCalculoValor","default":"000000000000000"},
+    {"tag":"pisCofinsFundamentoLegalReducaoCodigo","default":"00"},
+    {"tag":"pisCofinsRegimeTributacaoCodigo","default":"1"},
+    {"tag":"pisCofinsRegimeTributacaoNome","default":"RECOLHIMENTO INTEGRAL"},
+    {"tag":"pisPasepAliquotaAdValorem","default":"00000"},
+    {"tag":"pisPasepAliquotaEspecificaQuantidadeUnidade","default":"000000000"},
+    {"tag":"pisPasepAliquotaEspecificaValor","default":"0000000000"},
+    {"tag":"pisPasepAliquotaReduzida","default":"00000"},
+    {"tag":"pisPasepAliquotaValorDevido","default":"000000000000000"},
+    {"tag":"pisPasepAliquotaValorRecolher","default":"000000000000000"},
+    {"tag":"icmsBaseCalculoValor","default":"000000000000000"},
+    {"tag":"icmsBaseCalculoAliquota","default":"00000"},
+    {"tag":"icmsBaseCalculoValorImposto","default":"00000000000000"},
+    {"tag":"icmsBaseCalculoValorDiferido","default":"00000000000000"},
+    {"tag":"cbsIbsCst","default":"000"},
+    {"tag":"cbsIbsClasstrib","default":"000001"},
+    {"tag":"cbsBaseCalculoValor","default":"000000000000000"},
+    {"tag":"cbsBaseCalculoAliquota","default":"00000"},
+    {"tag":"cbsBaseCalculoAliquotaReducao","default":"00000"},
+    {"tag":"cbsBaseCalculoValorImposto","default":"00000000000000"},
+    {"tag":"ibsBaseCalculoValor","default":"000000000000000"},
+    {"tag":"ibsBaseCalculoAliquota","default":"00000"},
+    {"tag":"ibsBaseCalculoAliquotaReducao","default":"00000"},
+    {"tag":"ibsBaseCalculoValorImposto","default":"00000000000000"},
+    {"tag":"relacaoCompradorVendedor","default":"Fabricante é desconhecido"},
+    {"tag":"seguroMoedaNegociadaCodigo","default":"220"},
+    {"tag":"seguroMoedaNegociadaNome","default":"DOLAR DOS EUA"},
+    {"tag":"seguroValorMoedaNegociada","default":"000000000000000"},
+    {"tag":"seguroValorReais","default":"000000000000000"},
+    {"tag":"sequencialRetificacao","default":"00"},
+    {"tag":"valorMultaARecolher","default":"000000000000000"},
+    {"tag":"valorMultaARecolherAjustado","default":"000000000000000"},
+    {"tag":"valorReaisFreteInternacional","default":"000000000000000"},
+    {"tag":"valorReaisSeguroInternacional","default":"000000000000000"},
+    {"tag":"valorTotalCondicaoVenda","default":"00000000000"},
+    {"tag":"vinculoCompradorVendedor","default":"Não há vinculação entre comprador e vendedor."},
+]
+
+FOOTER_TAGS = {
+    "armazem":{"tag":"nomeArmazem","default":"TCP"},
+    "armazenamentoRecintoAduaneiroCodigo":"9801303",
+    "armazenamentoRecintoAduaneiroNome":"TCP - TERMINAL",
+    "armazenamentoSetor":"002",
+    "canalSelecaoParametrizada":"001",
+    "caracterizacaoOperacaoCodigoTipo":"1",
+    "caracterizacaoOperacaoDescricaoTipo":"Importação Própria",
+    "cargaDataChegada":"20251120",
+    "cargaNumeroAgente":"N/I",
+    "cargaPaisProcedenciaCodigo":"386",
+    "cargaPaisProcedenciaNome":"",
+    "cargaPesoBruto":"000000000000000",
+    "cargaPesoLiquido":"000000000000000",
+    "cargaUrfEntradaCodigo":"0917800",
+    "cargaUrfEntradaNome":"PORTO DE PARANAGUA",
+    "conhecimentoCargaEmbarqueData":"20251025",
+    "conhecimentoCargaEmbarqueLocal":"EXTERIOR",
+    "conhecimentoCargaId":"CE123456",
+    "conhecimentoCargaIdMaster":"CE123456",
+    "conhecimentoCargaTipoCodigo":"12",
+    "conhecimentoCargaTipoNome":"HBL - House Bill of Lading",
+    "conhecimentoCargaUtilizacao":"1",
+    "conhecimentoCargaUtilizacaoNome":"Total",
+    "dataDesembaraco":"20251124",
+    "dataRegistro":"20251124",
+    "documentoChegadaCargaCodigoTipo":"1",
+    "documentoChegadaCargaNome":"Manifesto da Carga",
+    "documentoChegadaCargaNumero":"1625502058594",
+    "embalagem":[{"tag":"codigoTipoEmbalagem","default":"60"},
+                 {"tag":"nomeEmbalagem","default":"PALLETS"},
+                 {"tag":"quantidadeVolume","default":"00001"}],
+    "freteCollect":"000000000000000",
+    "freteEmTerritorioNacional":"000000000000000",
+    "freteMoedaNegociadaCodigo":"978",
+    "freteMoedaNegociadaNome":"EURO/COM.EUROPEIA",
+    "fretePrepaid":"000000000000000",
+    "freteTotalDolares":"000000000000000",
+    "freteTotalMoeda":"000000000000000",
+    "freteTotalReais":"000000000000000",
+    "icms":[{"tag":"agenciaIcms","default":"00000"},
+            {"tag":"codigoTipoRecolhimentoIcms","default":"3"},
+            {"tag":"nomeTipoRecolhimentoIcms","default":"Exoneração do ICMS"},
+            {"tag":"numeroSequencialIcms","default":"001"},
+            {"tag":"ufIcms","default":"PR"},
+            {"tag":"valorTotalIcms","default":"000000000000000"}],
+    "importadorCodigoTipo":"1",
+    "importadorCpfRepresentanteLegal":"00000000000",
+    "importadorEnderecoBairro":"CENTRO",
+    "importadorEnderecoCep":"00000000",
+    "importadorEnderecoComplemento":"",
+    "importadorEnderecoLogradouro":"RUA PRINCIPAL",
+    "importadorEnderecoMunicipio":"CIDADE",
+    "importadorEnderecoNumero":"00",
+    "importadorEnderecoUf":"PR",
+    "importadorNome":"",
+    "importadorNomeRepresentanteLegal":"REPRESENTANTE",
+    "importadorNumero":"",
+    "importadorNumeroTelefone":"0000000000",
+    "informacaoComplementar":"Informações extraídas do Sistema Integrado DUIMP 2026.",
+    "localDescargaTotalDolares":"000000000000000",
+    "localDescargaTotalReais":"000000000000000",
+    "localEmbarqueTotalDolares":"000000000000000",
+    "localEmbarqueTotalReais":"000000000000000",
+    "modalidadeDespachoCodigo":"1",
+    "modalidadeDespachoNome":"Normal",
+    "numeroDUIMP":"",
+    "operacaoFundap":"N",
+    "pagamento":[],
+    "seguroMoedaNegociadaCodigo":"220",
+    "seguroMoedaNegociadaNome":"DOLAR DOS EUA",
+    "seguroTotalDolares":"000000000000000",
+    "seguroTotalMoedaNegociada":"000000000000000",
+    "seguroTotalReais":"000000000000000",
+    "sequencialRetificacao":"00",
+    "situacaoEntregaCarga":"ENTREGA CONDICIONADA",
+    "tipoDeclaracaoCodigo":"01",
+    "tipoDeclaracaoNome":"CONSUMO",
+    "totalAdicoes":"000",
+    "urfDespachoCodigo":"0917800",
+    "urfDespachoNome":"PORTO DE PARANAGUA",
+    "valorTotalMultaARecolherAjustado":"000000000000000",
+    "viaTransporteCodigo":"01",
+    "viaTransporteMultimodal":"N",
+    "viaTransporteNome":"MARÍTIMA",
+    "viaTransporteNomeTransportador":"MAERSK A/S",
+    "viaTransporteNomeVeiculo":"MAERSK",
+    "viaTransportePaisTransportadorCodigo":"741",
+    "viaTransportePaisTransportadorNome":"CINGAPURA",
 }
 
-# Verificar se o pacote kaleido está instalado
-try:
-    import kaleido
-except ImportError:
-    st.error("O pacote 'kaleido' é necessário para exportar gráficos como imagens. Por favor, instale-o executando: pip install -U kaleido")
-    st.stop()
 
-# Função para salvar respostas no arquivo
-def salvar_respostas(nome, email, respostas):
-    try:
-        dados = {"nome": nome, "email": email, "respostas": respostas}
-        with open(f"respostas_{email}.json", "w") as arquivo:
-            json.dump(dados, arquivo)
-        st.success("Respostas salvas com sucesso! Você pode continuar mais tarde.")
-    except Exception as e:
-        st.error(f"Erro ao salvar respostas: {e}")
+class DataFormatter:
+    @staticmethod
+    def clean_text(text):
+        if not text: return ""
+        return re.sub(r'\s+', ' ', text.replace('\n',' ').replace('\r','')).strip()
 
-# Função para carregar respostas do arquivo
-def carregar_respostas(email):
-    try:
-        with open(f"respostas_{email}.json", "r") as arquivo:
-            dados = json.load(arquivo)
-        return dados.get("respostas", {})
-    except FileNotFoundError:
-        st.warning("Nenhum progresso salvo encontrado para este e-mail.")
-        return {}
-    except Exception as e:
-        st.error(f"Erro ao carregar respostas: {e}")
-        return {}
+    @staticmethod
+    def format_number(value, length=15):
+        if not value: return "0"*length
+        clean = re.sub(r'\D','',str(value))
+        return clean.zfill(length) if clean else "0"*length
 
-# Função para verificar se todas as perguntas obrigatórias foram respondidas
-def verificar_obrigatorias_preenchidas(grupo, perguntas_hierarquicas, perguntas_obrigatorias, respostas):
-    obrigatorias_no_grupo = [
-        subitem for subitem in perguntas_hierarquicas[grupo]["subitens"].keys()
-        if subitem in perguntas_obrigatorias
-    ]
-    todas_preenchidas = all(
-        respostas.get(subitem, "Selecione") != "Selecione"
-        for subitem in obrigatorias_no_grupo
-    )
-    return todas_preenchidas, obrigatorias_no_grupo
+    @staticmethod
+    def format_ncm(value):
+        if not value: return "00000000"
+        return re.sub(r'\D','',value)[:8]
 
-def calcular_porcentagem_grupo(grupo, perguntas_hierarquicas, respostas):
-    soma_respostas = sum(respostas[subitem] for subitem in perguntas_hierarquicas[grupo]["subitens"].keys())
-    num_perguntas = len(perguntas_hierarquicas[grupo]["subitens"])
-    valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
-    return valor_percentual
+    @staticmethod
+    def format_input_fiscal(value, length=15, is_percent=False):
+        try:
+            if isinstance(value, str):
+                value = value.replace('.','').replace(',','.')
+            return str(int(round(float(value)*100))).zfill(length)
+        except: return "0"*length
 
-def exportar_questionario(respostas, perguntas_hierarquicas):
-    # Exportar apenas perguntas respondidas (respostas diferentes de "Selecione")
-    linhas = []
-    for item, conteudo in perguntas_hierarquicas.items():
-        for subitem, subpergunta in conteudo["subitens"].items():
-            resposta = respostas.get(subitem, "Selecione")
-            if resposta != "Selecione":
-                linhas.append({"Pergunta": subpergunta, "Resposta": resposta})
+    @staticmethod
+    def format_high_precision(value, length=15):
+        try:
+            if isinstance(value, str):
+                value = value.replace('.','').replace(',','.')
+            return str(int(round(float(value)*10000000))).zfill(length)
+        except: return "0"*length
 
-    df_respostas = pd.DataFrame(linhas)
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df_respostas.to_excel(writer, index=False, sheet_name='Questionário')
-    return output.getvalue()
+    @staticmethod
+    def format_quantity(value, length=14):
+        try:
+            if isinstance(value, str):
+                value = value.replace('.','').replace(',','.')
+            return str(int(round(float(value)*100000))).zfill(length)
+        except: return "0"*length
 
-def enviar_email(destinatario, arquivo_questionario, fig_original, fig_normalizado):
-    servidor_smtp = st.secrets["email_config"]["servidor_smtp"]
-    porta = st.secrets["email_config"]["porta"]
-    user = st.secrets["email_config"]["user"]     # LOGIN SMTP
-    senha = st.secrets["email_config"]["senha"]      # SENHA SMTP
-    remetente = st.secrets["email_config"]["email"]     # E-mail autorizado
+    @staticmethod
+    def calculate_cbs_ibs(base_xml_string):
+        try:
+            bf = int(base_xml_string)/100.0
+            cbs = str(int(round(bf*0.009*100))).zfill(14)
+            ibs = str(int(round(bf*0.001*100))).zfill(14)
+            return cbs, ibs
+        except: return "0".zfill(14), "0".zfill(14)
 
-    # Lista de destinatários - o email do usuário e o email fixo
-    destinatarios = [destinatario, "profile@realiconsultoria.com.br"]
-
-    # Configurar o email
-    msg = MIMEMultipart()
-    msg['From'] = remetente
-    msg['To'] = ", ".join(destinatarios)
-    msg['Subject'] = "Obrigado por preencher a Matriz de Maturidade!"
-
-    # Mensagem de Relatório de Progresso
-    grupo_atual_nome = grupos[st.session_state.grupo_atual]
-    respostas_numericas = {k: mapeamento_respostas[v] for k, v in st.session_state.respostas.items()}
-    soma_respostas = sum(respostas_numericas[subitem] for subitem in perguntas_hierarquicas[grupo_atual_nome]["subitens"].keys())
-    num_perguntas = len(perguntas_hierarquicas[grupo_atual_nome]["subitens"])
-    if num_perguntas > 0:
-        valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
-        nivel_atual = ""
-        if valor_percentual < 26:
-            nivel_atual = "INICIAL"
-        elif valor_percentual < 51:
-            nivel_atual = "ORGANIZAÇÃO"
-        elif valor_percentual < 71:
-            nivel_atual = "CONSOLIDAÇÃO"
-        elif valor_percentual < 90:
-            nivel_atual = "OTIMIZAÇÃO"
-        elif valor_percentual >= 91:
-            nivel_atual = "EXCELÊNCIA"
-
-        # Determinar os próximos blocos
-        proximos_blocos = grupos[st.session_state.grupo_atual + 1:] if st.session_state.grupo_atual + 1 < len(grupos) else []
-        proximos_blocos_texto = ", ".join(proximos_blocos) if proximos_blocos else "Nenhum bloco restante."
-
-        # Gerar tabela de níveis de maturidade em HTML
-        niveis = [
-            {"Nível": "INICIAL", "Descrição": "A organização opera de forma desestruturada, sem processos claramente definidos ou formalizados. As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada. A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.", "Atual": "✔️" if nivel_atual == "INICIAL" else ""},
-            {"Nível": "ORGANIZAÇÃO", "Descrição": "A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada. Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada. As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.", "Atual": "✔️" if nivel_atual == "ORGANIZAÇÃO" else ""},
-            {"Nível": "CONSOLIDAÇÃO", "Descrição": "Os processos são formalmente documentados e seguidos de maneira estruturada. Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual. A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas. Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.", "Atual": "✔️" if nivel_atual == "CONSOLIDAÇÃO" else ""},
-            {"Nível": "OTIMIZAÇÃO", "Descrição": "Os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho. A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades. A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional. O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.", "Atual": "✔️" if nivel_atual == "OTIMIZAÇÃO" else ""},
-            {"Nível": "EXCELÊNCIA", "Descrição": "A organização alcança um nível de referência, caracterizado por uma cultura de melhoria contínua e inovação. Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico. Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório. O comprometimento com a excelência e a sustentabilidade impulsiona a organização a atuar como referência no setor.", "Atual": "✔️" if nivel_atual == "EXCELÊNCIA" else ""}
-        ]
-        
-        tabela_html = """
-        <table border="1" style="width:100%; border-collapse: collapse;">
-            <thead>
-                <tr style="background-color: #f2f2f2;">
-                    <th style="padding: 8px; text-align: left;">Nível</th>
-                    <th style="padding: 8px; text-align: left;">Descrição</th>
-                    <th style="padding: 8px; text-align: center;">Atual</th>
-                </tr>
-            </thead>
-            <tbody>
-        """
-        
-        for nivel in niveis:
-            tabela_html += f"""
-                <tr>
-                    <td style="padding: 8px; border: 1px solid #ddd;"><strong>{nivel['Nível']}</strong></td>
-                    <td style="padding: 8px; border: 1px solid #ddd;">{nivel['Descrição']}</td>
-                    <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">{nivel['Atual']}</td>
-                </tr>
-            """
-        
-        tabela_html += """
-            </tbody>
-        </table>
-        """
-
-        # Corpo do email com gráficos embutidos e mensagem de progresso
-        corpo = f"""
-        <p>Prezado(a) {st.session_state.nome},</p>
-        <p>Oi, tudo bem?<p>
-        <p>Antes de tudo, queremos agradecer por ter dedicado um tempinho para preencher a nossa Matriz de Maturidade.<p>
-        <p>Essa ferramenta nos ajuda (e muito!) a entender onde estamos e como podemos evoluir ainda mais juntos.<p>
-        <p>Com a sua colaboração, conseguimos identificar pontos fortes, áreas de melhoria e oportunidades para dar aquele próximo passo rumo a uma operação mais eficiente e estratégica.<p>
-        <p>📄 Relatório em mãos!<p>
-        <p>Preparamos um material com os principais insights da análise::</p>
-        <p><b>Gráfico de Radar - Nível Atual:</b></p>
-        <img src="cid:fig_original" alt="Gráfico Original" style="width:600px;">
-        <p><b>Gráfico de Radar - Normalizado:</b></p>
-        <img src="cid:fig_normalizado" alt="Gráfico Normalizado" style="width:600px;">
-        <p>Em anexo, você encontrará o questionário preenchido.</p>
-        <hr>
-        <h3>Relatório de Progresso</h3>
-        <p>Você completou o Bloco <b>{grupo_atual_nome}</b>. Os resultados indicam que o seu nível de maturidade neste bloco é classificado como: <b>{nivel_atual}</b>.</p>
-        <p>Para aprofundarmos a análise e oferecermos insights mais estratégicos, recomendamos que você complete também:</p>
-        <p><b>{proximos_blocos_texto}</b></p>
-        
-        <h3>Trilha de Níveis de Maturidade</h3>
-        {tabela_html}
-        
-        <p>E agora?<p>
-        <p>Com base nisso, podemos montar juntos um plano de ação que faça sentido para o seu momento e gere resultados concretos.<p>
-        <p>Se quiser trocar ideias, tirar dúvidas ou compartilhar sugestões, é só dar um alô — vamos adorar conversar com você!<p>
-        <p>Abraços,<p>
-        <p>Equipe Reali Consultoria<p>
-        <p>contato@realiconsultoria.com.br<p>
-        <p>41 3017 - 5001 PR<p>
-        <p>11 3141 - 4500 SP<p>
-        <p>47 3025 - 2900 SC<p>
-        <p><a href="https://www.realiconsultoria.com.br">www.realiconsultoria.com.br</a></p>
-        """
-        msg.attach(MIMEText(corpo, 'html'))
-
-    # Anexar o arquivo do questionário
-    anexo = MIMEBase('application', 'octet-stream')
-    anexo.set_payload(arquivo_questionario)
-    encoders.encode_base64(anexo)
-    anexo.add_header('Content-Disposition', f'attachment; filename="questionario_preenchido.xlsx"')
-    msg.attach(anexo)
-
-    # Adicionar gráficos como imagens embutidas
-    try:
-        if fig_original is not None:
-            img_original = BytesIO()
-            fig_original.write_image(img_original, format="png", engine="kaleido")
-            img_original.seek(0)
-            img_original_mime = MIMEBase('image', 'png', filename="grafico_original.png")
-            img_original_mime.set_payload(img_original.read())
-            encoders.encode_base64(img_original_mime)
-            img_original_mime.add_header('Content-ID', '<fig_original>')
-            img_original_mime.add_header('Content-Disposition', 'inline', filename="grafico_original.png")
-            msg.attach(img_original_mime)
-        else:
-            raise ValueError("Gráfico Original não foi gerado.")
-
-        if fig_normalizado is not None:
-            img_normalizado = BytesIO()
-            fig_normalizado.write_image(img_normalizado, format="png", engine="kaleido")
-            img_normalizado.seek(0)
-            img_normalizado_mime = MIMEBase('image', 'png', filename="grafico_normalizado.png")
-            img_normalizado_mime.set_payload(img_normalizado.read())
-            encoders.encode_base64(img_normalizado_mime)
-            img_normalizado_mime.add_header('Content-ID', '<fig_normalizado>')
-            img_normalizado_mime.add_header('Content-Disposition', 'inline', filename="grafico_normalizado.png")
-            msg.attach(img_normalizado_mime)
-        else:
-            raise ValueError("Gráfico Normalizado não foi gerado.")
-    except Exception as e:
-        st.error(f"Erro ao gerar imagens dos gráficos: {e}")
-        return False
-
-    # Enviar o email com depuração detalhada
-    try:
-        with smtplib.SMTP(servidor_smtp, porta) as server:
-            server.set_debuglevel(1)    # Ativa o log detalhado
-            server.ehlo()
-            server.starttls()   # Inicia o TLS
-            server.login(user, senha)
-            server.sendmail(remetente, destinatarios, msg.as_string())
-        return True
-    except smtplib.SMTPAuthenticationError as e:
-        st.error(f"Erro de autenticação: {str(e)}")     # Erro de login (usuario/senha)
-        return False
-    except Exception as e:
-        st.error(f"Erro detalhado: {str(e)}")       # Para outros tipos de erro
-        return False
-
-def gerar_graficos_radar(perguntas_hierarquicas, respostas):
-    respostas_numericas = {k: mapeamento_respostas[v] for k, v in respostas.items()}
-    categorias = []
-    valores = []
-    valores_normalizados = []
-    
-    for item, conteudo in perguntas_hierarquicas.items():
-        soma_respostas = sum(respostas_numericas[subitem] for subitem in conteudo["subitens"].keys())
-        num_perguntas = len(conteudo["subitens"])
-        if num_perguntas > 0:
-            valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
-            valor_normalizado = (soma_respostas / valor_percentual) * 100 if valor_percentual > 0 else 0
-            categorias.append(conteudo["titulo"])
-            valores.append(valor_percentual)
-            valores_normalizados.append(valor_normalizado)
-    
-    if len(categorias) != len(valores) or len(categorias) != len(valores_normalizados):
-        st.error("Erro: As listas de categorias e valores têm tamanhos diferentes.")
-        return None, None
-    
-    # Gráfico Original
-    valores_original = valores + valores[:1]
-    categorias_original = categorias + categorias[:1]
-    fig_original = go.Figure()
-    fig_original.add_trace(go.Scatterpolar(
-        r=valores_original,
-        theta=categorias_original,
-        fill='toself',
-        name='Gráfico Original'
-    ))
-    fig_original.update_layout(
-        polar=dict(
-            radialaxis=dict(
-                visible=True,
-                range=[0, 100]
-            )),
-        showlegend=False,
-        title="Gráfico de Radar - Nível Atual"
-    )
-    
-    # Gráfico Normalizado
-    valores_normalizados_fechado = valores_normalizados + valores_normalizados[:1]
-    fig_normalizado = go.Figure()
-    fig_normalizado.add_trace(go.Scatterpolar(
-        r=valores_normalizados_fechado,
-        theta=categorias_original,
-        fill='toself',
-        name='Gráfico Normalizado'
-    ))
-    fig_normalizado.update_layout(
-        polar=dict(
-            radialaxis=dict(
-                visible=True,
-                range=[0, 100]
-            )),
-        showlegend=False,
-        title="Gráfico de Radar - Normalizado"
-    )
-    
-    return fig_original, fig_normalizado
-
-# Função para exibir a tabela de níveis de maturidade com destaque no nível atual
-def exibir_tabela_niveis_maturidade(nivel_atual):
-    niveis = [
-        {
-            "Nível": "INICIAL",
-            "Descrição": (
-                "A organização opera de forma desestruturada, sem processos claramente definidos ou formalizados. "
-                "As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, "
-                "tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada. "
-                "A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais "
-                "e elevado risco de não conformidade regulatória."
-            )
-        },
-        {
-            "Nível": "ORGANIZAÇÃO",
-            "Descrição": (
-                "A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada. "
-                "Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência "
-                "na execução continue limitada. As atividades ainda dependem fortemente da experiência individual, e a governança sobre "
-                "os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos."
-            )
-        },
-        {
-            "Nível": "CONSOLIDAÇÃO",
-            "Descrição": (
-                "Os processos são formalmente documentados e seguidos de maneira estruturada. Existe uma clareza maior sobre as responsabilidades "
-                "e papéis, o que reduz a dependência do conhecimento individual. A implementação de controles internos começa a ganhar robustez, "
-                "permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas. Indicadores de desempenho são introduzidos, permitindo "
-                "um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento."
-            )
-        },
-        {
-            "Nível": "OTIMIZAÇÃO",
-            "Descrição": (
-                "Os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho. "
-                "A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades. "
-                "A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional. "
-                "O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo."
-            )
-        },
-        {
-            "Nível": "EXCELÊNCIA",
-            "Descrição": (
-                "A organização alcança um nível de referência, caracterizado por uma cultura de melhoria contínua e inovação. "
-                "Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico. "
-                "Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório. "
-                "O comprometimento com a excelência e a sustentabilidade impulsiona a organização a atuar como referência no setor."
-            )
-        }
-    ]
-    # Adicionar uma coluna para destacar o nível atual
-    for nivel in niveis:
-        nivel["Atual"] = "✔️" if nivel["Nível"] == nivel_atual else ""
-
-    # Ajustar estilo da tabela para a coluna "Nível"
-    df_niveis = pd.DataFrame(niveis)
-    df_niveis = df_niveis.reset_index(drop=True)  # Remove a coluna de índice padrão (0, 1, 2, 3, 4)
-    styled_table = df_niveis.style.set_properties(
-        **{'font-size': '10px', 'white-space': 'nowrap'}, subset=['Nível']
-    )
-
-    st.write("### Tilha de Níveis de Maturidade")
-    st.table(styled_table)
-
-def mostrar_nivel_maturidade(total_porcentagem):
-    if total_porcentagem < 26:
-        nivel_atual = "INICIAL"
-        st.warning("SEU NÍVEL ATUAL É: INICIAL")
-        st.info("""
-        **NIVEL DE MATURIDADE INICIAL:** 
-        Neste estágio, a organização opera de forma desestruturada, sem processos claramente definidos ou formalizados. 
-        As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada. 
-        A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.
-        """)
-    elif total_porcentagem < 51:
-        nivel_atual = "ORGANIZAÇÃO"
-        st.warning("SEU NÍVEL ATUAL É: ORGANIZAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE ORGANIZAÇÃO:** 
-        A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada. 
-        Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada. 
-        As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.
-        """)
-    elif total_porcentagem < 71:
-        nivel_atual = "CONSOLIDAÇÃO"
-        st.warning("SEU NÍVEL ATUAL É: CONSOLIDAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE CONSOLIDAÇÃO:** 
-        A organização atinge um nível de maturidade em que os processos são formalmente documentados e seguidos de maneira estruturada. 
-        Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual. 
-        A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas. 
-        Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.
-        """)
-    elif total_porcentagem < 90:
-        nivel_atual = "OTIMIZAÇÃO"
-        st.warning("SEU NÍVEL ATUAL É: OTIMIZAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE OTIMIZAÇÃO:** 
-        Neste estágio, os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho. 
-        A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades. 
-        A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional. 
-        O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.
-        """)
-    elif total_porcentagem >= 91:
-        nivel_atual = "EXCELÊNCIA"
-        st.success("SEU NÍVEL ATUAL É: EXCELÊNCIA")
-        st.info("""
-        **NIVEL DE MATURIDADE EXCELÊNCIA:** 
-        A organização alcança um nível de maturidade de referência, caracterizado por uma cultura de melhoria contínua e inovação. 
-        Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico. 
-        Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório. 
-        O comprometimento com a excelência e a sustentabilidade impulsiona a organização a atuar como referência no setor.
-        """)
-    
-    # Exibir a tabela de níveis de maturidade com o nível atual destacado
-    exibir_tabela_niveis_maturidade(nivel_atual)
-
-def mostrar_nivel_atual_por_grupo(grupo, valor_percentual):
-    if valor_percentual < 26:
-        nivel_atual = "INICIAL"
-        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: INICIAL")
-        st.info("""
-        **NIVEL DE MATURIDADE INICIAL:**
-        Neste estágio, a organização opera de forma desestruturada, sem processos claramente definidos ou formalizados.
-        As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada.
-        A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.
-        """)
-    elif valor_percentual < 51:
-        nivel_atual = "ORGANIZAÇÃO"
-        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: ORGANIZAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE ORGANIZAÇÃO:**
-        A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada.
-        Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada.
-        As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.
-        """)
-    elif valor_percentual < 71:
-        nivel_atual = "CONSOLIDAÇÃO"
-        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: CONSOLIDAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE CONSOLIDAÇÃO:**
-        A organização atinge um nível de maturidade em que os processos são formalmente documentados e seguidos de maneira estruturada.
-        Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual.
-        A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas.
-        Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.
-        """)
-    elif valor_percentual < 90:
-        nivel_atual = "OTIMIZAÇÃO"
-        st.warning(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: OTIMIZAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE OTIMIZAÇÃO:**
-        Neste estágio, os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho.
-        A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades.
-        A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional.
-        O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.
-        """)
-    elif valor_percentual >= 91:
-        nivel_atual = "EXCELÊNCIA"
-        st.success(f"SEU NÍVEL ATUAL NO GRUPO '{grupo}' É: EXCELÊNCIA")
-        st.info("""
-        **NIVEL DE MATURIDADE EXCELÊNCIA:**
-        A organização alcança um nível de maturidade de referência, caracterizado por uma cultura de melhoria contínua e inovação.
-        Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico.
-        Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório.
-        """)
-    
-    # Exibir a tabela de níveis de maturidade com o nível atual destacado
-    exibir_tabela_niveis_maturidade(nivel_atual)
-
-def validar_nivel_maturidade(soma_percentual, total_porcentagem):
-    if soma_percentual < 26:
-        st.warning("SEU NÍVEL ATUAL É: INICIAL")
-        st.info("""
-        **NIVEL DE MATURIDADE INICIAL:**
-        Neste estágio, a organização opera de forma desestruturada, sem processos claramente definidos ou formalizados.
-        As atividades são executadas de maneira reativa, sem padronização ou diretrizes estabelecidas, tornando a execução dependente do conhecimento tácito de indivíduos, em vez de uma abordagem institucionalizada.
-        A ausência de controle efetivo e a inexistência de mecanismos de monitoramento resultam em vulnerabilidades operacionais e elevado risco de não conformidade regulatória.
-        """)
-    elif soma_percentual < 51:
-        st.warning("SEU NÍVEL ATUAL É: ORGANIZAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE ORGANIZAÇÃO:**
-        A organização começa a estabelecer processos básicos, ainda que de maneira incipiente e pouco estruturada.
-        Algumas diretrizes são documentadas e há um esforço para replicar práticas em diferentes áreas, embora a consistência na execução continue limitada.
-        As atividades ainda dependem fortemente da experiência individual, e a governança sobre os processos é mínima, resultando em baixa previsibilidade e dificuldade na identificação e mitigação de riscos sistêmicos.
-        """)
-    elif soma_percentual < 71:
-        st.warning("SEU NÍVEL ATUAL É: CONSOLIDAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE CONSOLIDAÇÃO:**
-        A organização atinge um nível de maturidade em que os processos são formalmente documentados e seguidos de maneira estruturada.
-        Existe uma clareza maior sobre as responsabilidades e papéis, o que reduz a dependência do conhecimento individual.
-        A implementação de controles internos começa a ganhar robustez, permitindo um maior alinhamento com as diretrizes regulatórias e estratégicas.
-        Indicadores de desempenho são introduzidos, permitindo um acompanhamento inicial da eficácia operacional, embora a cultura de melhoria contínua ainda esteja em desenvolvimento.
-        """)
-    elif soma_percentual < 90:
-        st.warning("SEU NÍVEL ATUAL É: OTIMIZAÇÃO")
-        st.info("""
-        **NIVEL DE MATURIDADE OTIMIZAÇÃO:**
-        Neste estágio, os processos estão plenamente integrados e gerenciados de maneira eficiente, com monitoramento contínuo e análise sistemática de desempenho.
-        A organização adota mecanismos formais de governança e controle, utilizando métricas para avaliação e aprimoramento das atividades.
-        A mitigação de riscos torna-se mais eficaz, com a implementação de políticas proativas para conformidade regulatória e excelência operacional.
-        O aprendizado organizacional é fomentado, garantindo a adaptação rápida a mudanças no ambiente interno e externo.
-        """)
-    elif soma_percentual >= 91:
-        st.success("SEU NÍVEL ATUAL É: EXCELÊNCIA")
-        st.info("""
-        **NIVEL DE MATURIDADE EXCELÊNCIA:**
-        A organização alcança um nível de maturidade de referência, caracterizado por uma cultura de melhoria contínua e inovação.
-        Os processos são constantemente avaliados e aprimorados com base em análise de dados e benchmarking, garantindo máxima eficiência e alinhamento estratégico.
-        Há uma integração plena entre tecnologia, governança e gestão de riscos, promovendo uma operação resiliente e altamente adaptável às mudanças do mercado e do cenário regulatório.
-        """)
-
-if "formulario_preenchido" not in st.session_state:
-    st.session_state.formulario_preenchido = False
-if "grupo_atual" not in st.session_state:
-    st.session_state.grupo_atual = 0
-if "respostas" not in st.session_state:
-    st.session_state.respostas = {}
-if "mostrar_graficos" not in st.session_state:
-    st.session_state.mostrar_graficos = False
-
-# Inicializar as variáveis fig_original e fig_normalizado para evitar erros
-fig_original = None
-fig_normalizado = None
-
-# ─── URL DA NOVA LOGO ────────────────────────────────────────────────────────
-LOGO_URL = "https://raw.githubusercontent.com/DaniloNs-creator/MATURITY/main/R%20Reali%20azul%201.png"
-# ─────────────────────────────────────────────────────────────────────────────
-
-if not st.session_state.formulario_preenchido:
-    # Adicionando a imagem no início com tamanho reduzido
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        st.image(LOGO_URL, width=300)
-        st.header("DIAGNÓSTICO DE GESTÃO, GOVERNANÇA E CONTROLES")
-        st.subheader("Preencha suas informações para iniciar:")
-
-        nome = st.text_input("Nome")
-        email = st.text_input("E-mail")
-        empresa = st.text_input("Empresa")
-        telefone = st.text_input("Telefone")
-        if st.button("Prosseguir"):
-            if nome and email and empresa and telefone:
-                st.session_state.nome = nome
-                st.session_state.email = email
-                st.session_state.empresa = empresa
-                st.session_state.telefone = telefone
-                st.session_state.formulario_preenchido = True
-
-                # Carregar respostas salvas, se existirem
-                st.session_state.respostas = carregar_respostas(email)
-                st.success("Informações preenchidas com sucesso! Você pode prosseguir para o questionário.")
+    @staticmethod
+    def parse_supplier_info(raw_name, raw_addr):
+        data = {"fornecedorNome":"","fornecedorLogradouro":"","fornecedorNumero":"S/N","fornecedorCidade":""}
+        if raw_name:
+            parts = raw_name.split('-',1)
+            data["fornecedorNome"] = parts[-1].strip() if len(parts)>1 else raw_name.strip()
+        if raw_addr:
+            ca = DataFormatter.clean_text(raw_addr)
+            pd_ = ca.rsplit('-',1)
+            if len(pd_)>1:
+                data["fornecedorCidade"] = pd_[1].strip()
+                street = pd_[0].strip()
             else:
-                st.error("Por favor, preencha todos os campos antes de prosseguir.")
+                data["fornecedorCidade"] = "EXTERIOR"; street = ca
+            cs = street.rsplit(',',1)
+            if len(cs)>1:
+                data["fornecedorLogradouro"] = cs[0].strip()
+                m = re.search(r'\d+', cs[1])
+                if m: data["fornecedorNumero"] = m.group(0)
+            else:
+                data["fornecedorLogradouro"] = street
+        return data
 
-        # Bloco de apresentação profissional com background animado
-        st.markdown("""
-        <style>
-        /* Fundo animado para o bloco de apresentação */
-        .apresentacao-animada-bg {
-            position: relative;
-            overflow: hidden;
-            background: linear-gradient(120deg, #f8fafc 60%, #e3e9f7 100%);
-            border-radius: 18px;
-            border: 1.5px solid #e0e0e0;
-            padding: 32px 28px 22px 28px;
-            margin-top: 18px;
-            margin-bottom: 18px;
-            box-shadow: 0 6px 24px rgba(44, 62, 80, 0.10);
-            font-family: 'Segoe UI', 'Arial', sans-serif;
-            z-index: 1;
-        }
-        /* Elementos animados no fundo */
-        .apresentacao-animada-bg .bg-shape1,
-        .apresentacao-animada-bg .bg-shape2,
-        .apresentacao-animada-bg .bg-shape3 {
-            position: absolute;
-            border-radius: 50%;
-            opacity: 0.18;
-            z-index: 0;
-            filter: blur(2px);
-        }
-        .apresentacao-animada-bg .bg-shape1 {
-            width: 180px; height: 180px;
-            background: #1976d2;
-            top: -40px; left: -60px;
-            animation: movebg1 8s infinite alternate;
-        }
-        .apresentacao-animada-bg .bg-shape2 {
-            width: 120px; height: 120px;
-            background: #43a047;
-            bottom: -30px; right: -40px;
-            animation: movebg2 10s infinite alternate;
-        }
-        .apresentacao-animada-bg .bg-shape3 {
-            width: 90px; height: 90px;
-            background: #fbc02d;
-            top: 60px; right: 30px;
-            animation: movebg3 12s infinite alternate;
-        }
-        @keyframes movebg1 {
-            0% { transform: translateY(0) scale(1);}
-            100% { transform: translateY(30px) scale(1.08);}
-        }
-        @keyframes movebg2 {
-            0% { transform: translateX(0) scale(1);}
-            100% { transform: translateX(-30px) scale(1.12);}
-        }
-        @keyframes movebg3 {
-            0% { transform: translateY(0) translateX(0) scale(1);}
-            100% { transform: translateY(-20px) translateX(20px) scale(1.05);}
-        }
-        .apresentacao-animada-bg h4 {
-            color: #1a237e;
-            margin-bottom: 14px;
-            font-size: 1.25rem;
-            font-weight: 700;
-            z-index: 2;
-            position: relative;
-        }
-        .apresentacao-animada-bg ul {
-            margin-top: 0;
-            margin-bottom: 0;
-            padding-left: 18px;
-            z-index: 2;
-            position: relative;
-        }
-        .apresentacao-animada-bg li {
-            margin-bottom: 6px;
-            font-size: 1.05rem;
-        }
-        .apresentacao-animada-bg .dimensao {
-            color: #0d47a1;
-            font-weight: 600;
-        }
-        .apresentacao-animada-bg .subitem {
-            color: #374151;
-            font-size: 0.98rem;
-        }
-        .apresentacao-animada-bg p {
-            margin-top: 16px;
-            font-size: 1.08rem;
-            color: #263238;
-            z-index: 2;
-            position: relative;
-        }
-        </style>
-        <div class="apresentacao-animada-bg">
-            <div class="bg-shape1"></div>
-            <div class="bg-shape2"></div>
-            <div class="bg-shape3"></div>
-            <h4>Bem-vindo ao Diagnóstico de Maturidade Empresarial</h4>
-            <p>
-                Esta ferramenta foi desenvolvida para proporcionar uma avaliação estratégica do nível de maturidade da sua empresa em três dimensões essenciais:
-            </p>
-            <ul>
-                <li class="dimensao">Gestão:
-                    <ul>
-                        <li class="subitem">Estrutura organizacional</li>
-                        <li class="subitem">Eficiência financeira</li>
-                    </ul>
-                </li>
-                <li class="dimensao">Governança:
-                    <ul>
-                        <li class="subitem">Gestão de processos</li>
-                        <li class="subitem">Gestão de riscos</li>
-                        <li class="subitem">Compliance regulatório</li>
-                        <li class="subitem">Efetividade do canal de denúncias</li>
-                    </ul>
-                </li>
-                <li class="dimensao">Áreas Operacionais:
-                    <ul>
-                        <li class="subitem">Recursos Humanos</li>
-                        <li class="subitem">Tecnologia da Informação</li>
-                        <li class="subitem">Gestão de compras e estoques</li>
-                        <li class="subitem">Contabilidade e controles financeiros</li>
-                        <li class="subitem">Logística e distribuição</li>
-                    </ul>
-                </li>
-            </ul>
-            <p>
-                <b>Por que realizar este diagnóstico?</b><br>
-                A análise integrada destes aspectos permite identificar pontos fortes, oportunidades de melhoria e priorizar ações para o crescimento sustentável do seu negócio. 
-                Ao final, você receberá um relatório personalizado com recomendações práticas para elevar a maturidade da sua organização.
-            </p>
-            <p style="margin-top:10px; color:#1565c0;">
-                <b>Confidencialidade garantida:</b> Todas as informações fornecidas serão tratadas com total sigilo e utilizadas exclusivamente para fins de diagnóstico e orientação estratégica.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-    with col2:
-        st.image("https://raw.githubusercontent.com/DaniloNs-creator/MATURITY/main/foto.jpg", use_container_width=True)
-else:
-    url_arquivo = "https://raw.githubusercontent.com/DaniloNs-creator/MATURITY/main/FOMULARIO.txt"
-    try:
-        response = requests.get(url_arquivo)
-        response.raise_for_status()
 
-        # Inicializar as variáveis para evitar erros
-        categorias = []
-        valores = []
-        valores_normalizados = []
-        lines = response.text.splitlines()
-        data = []
-        grupo_atual = None
-        for line in lines:
-            parts = line.strip().split(';')
-            if len(parts) >= 2:
-                classe = parts[0].strip()
-                pergunta = parts[1].strip()
+class XMLBuilder:
+    def __init__(self, parser, edited_items=None):
+        self.p = parser
+        self.items_to_use = edited_items if edited_items else self.p.items
+        self.root  = etree.Element("ListaDeclaracoes")
+        self.duimp = etree.SubElement(self.root, "duimp")
 
-                if classe.isdigit():
-                    grupo_atual = f"{classe} - {pergunta}"
+    def build(self, user_inputs=None):
+        h = self.p.header
+        duimp_fmt = h.get("numeroDUIMP","").split("/")[0].replace("-","").replace(".","")
+        totals = {"frete":0.0,"seguro":0.0,"ii":0.0,"ipi":0.0,"pis":0.0,"cofins":0.0}
+
+        def gf(val):
+            try:
+                if isinstance(val,str): val=val.replace('.','').replace(',','.')
+                return float(val)
+            except: return 0.0
+
+        for it in self.items_to_use:
+            totals["frete"]  += gf(it.get("Frete (R$)"))
+            totals["seguro"] += gf(it.get("Seguro (R$)"))
+            totals["ii"]     += gf(it.get("II (R$)"))
+            totals["ipi"]    += gf(it.get("IPI (R$)"))
+            totals["pis"]    += gf(it.get("PIS (R$)"))
+            totals["cofins"] += gf(it.get("COFINS (R$)"))
+
+        for it in self.items_to_use:
+            adicao = etree.SubElement(self.duimp, "adicao")
+            input_number  = str(it.get("NUMBER","")).strip()
+            original_desc = DataFormatter.clean_text(it.get("descricao",""))
+            desc_compl    = DataFormatter.clean_text(it.get("desc_complementar",""))
+            final_desc    = montar_descricao_final(desc_compl, input_number, original_desc)
+            vtvf  = DataFormatter.format_high_precision(it.get("valorTotal","0"), 11)
+            vuf   = DataFormatter.format_high_precision(it.get("valorUnit","0"), 20)
+            qcr   = it.get("quantidade_comercial") or it.get("quantidade")
+            qcf   = DataFormatter.format_quantity(qcr, 14)
+            qef   = DataFormatter.format_quantity(it.get("quantidade"), 14)
+            plf   = DataFormatter.format_quantity(it.get("pesoLiq"), 15)
+            btrf  = DataFormatter.format_input_fiscal(it.get("valorTotal","0"), 15)
+            rf    = gf(it.get("Frete (R$)",0))
+            rs    = gf(it.get("Seguro (R$)",0))
+            ra    = gf(it.get("Aduaneiro (R$)",0))
+            ff    = DataFormatter.format_input_fiscal(rf)
+            sf    = DataFormatter.format_input_fiscal(rs)
+            af    = DataFormatter.format_input_fiscal(ra)
+            iibf  = DataFormatter.format_input_fiscal(it.get("II Base (R$)",0))
+            iiaf  = DataFormatter.format_input_fiscal(it.get("II Alíq. (%)",0),5,True)
+            iivf  = DataFormatter.format_input_fiscal(gf(it.get("II (R$)",0)))
+            ipiaf = DataFormatter.format_input_fiscal(it.get("IPI Alíq. (%)",0),5,True)
+            ipivf = DataFormatter.format_input_fiscal(gf(it.get("IPI (R$)",0)))
+            pisbf = DataFormatter.format_input_fiscal(it.get("PIS Base (R$)",0))
+            pisaf = DataFormatter.format_input_fiscal(it.get("PIS Alíq. (%)",0),5,True)
+            pisvf = DataFormatter.format_input_fiscal(gf(it.get("PIS (R$)",0)))
+            cofaf = DataFormatter.format_input_fiscal(it.get("COFINS Alíq. (%)",0),5,True)
+            cofvf = DataFormatter.format_input_fiscal(gf(it.get("COFINS (R$)",0)))
+            icms_base = iibf if int(iibf)>0 else btrf
+            cbs_imp, ibs_imp = DataFormatter.calculate_cbs_ibs(icms_base)
+            sup = DataFormatter.parse_supplier_info(it.get("fornecedor_raw"), it.get("endereco_raw"))
+            emap = {
+                "numeroAdicao":str(it["numeroAdicao"])[-3:],
+                "numeroDUIMP":duimp_fmt,
+                "dadosMercadoriaCodigoNcm":DataFormatter.format_ncm(it.get("ncm")),
+                "dadosMercadoriaMedidaEstatisticaQuantidade":qef,
+                "dadosMercadoriaMedidaEstatisticaUnidade":it.get("unidade","").upper(),
+                "dadosMercadoriaPesoLiquido":plf,
+                "condicaoVendaMoedaNome":it.get("moeda","").upper(),
+                "valorTotalCondicaoVenda":vtvf,
+                "valorUnitario":vuf,
+                "condicaoVendaValorMoeda":btrf,
+                "condicaoVendaValorReais":af if int(af)>0 else btrf,
+                "paisOrigemMercadoriaNome":it.get("paisOrigem","").upper(),
+                "paisAquisicaoMercadoriaNome":it.get("paisOrigem","").upper(),
+                "descricaoMercadoria":final_desc,
+                "quantidade":qcf,
+                "unidadeMedida":it.get("unidade","").upper(),
+                "dadosCargaUrfEntradaCodigo":h.get("urf","0917800"),
+                "fornecedorNome":sup["fornecedorNome"][:60],
+                "fornecedorLogradouro":sup["fornecedorLogradouro"][:60],
+                "fornecedorNumero":sup["fornecedorNumero"][:10],
+                "fornecedorCidade":sup["fornecedorCidade"][:30],
+                "freteValorReais":ff,"seguroValorReais":sf,
+                "iiBaseCalculo":iibf,"iiAliquotaAdValorem":iiaf,
+                "iiAliquotaValorCalculado":iivf,"iiAliquotaValorDevido":iivf,"iiAliquotaValorRecolher":iivf,
+                "ipiAliquotaAdValorem":ipiaf,"ipiAliquotaValorDevido":ipivf,"ipiAliquotaValorRecolher":ipivf,
+                "pisCofinsBaseCalculoValor":pisbf,"pisPasepAliquotaAdValorem":pisaf,
+                "pisPasepAliquotaValorDevido":pisvf,"pisPasepAliquotaValorRecolher":pisvf,
+                "cofinsAliquotaAdValorem":cofaf,"cofinsAliquotaValorDevido":cofvf,"cofinsAliquotaValorRecolher":cofvf,
+                "icmsBaseCalculoValor":icms_base,"icmsBaseCalculoAliquota":"01800",
+                "cbsIbsClasstrib":"000001","cbsBaseCalculoValor":icms_base,
+                "cbsBaseCalculoAliquota":"00090","cbsBaseCalculoValorImposto":cbs_imp,
+                "ibsBaseCalculoValor":icms_base,"ibsBaseCalculoAliquota":"00010","ibsBaseCalculoValorImposto":ibs_imp,
+            }
+            for field in ADICAO_FIELDS_ORDER:
+                tag = field["tag"]
+                if field.get("type") == "complex":
+                    parent = etree.SubElement(adicao, tag)
+                    for child in field["children"]:
+                        etree.SubElement(parent, child["tag"]).text = emap.get(child["tag"], child["default"])
                 else:
-                    if grupo_atual:
-                        data.append({'grupo': grupo_atual, 'classe': classe, 'pergunta': pergunta})
+                    etree.SubElement(adicao, tag).text = emap.get(tag, field["default"])
 
-        perguntas_df = pd.DataFrame(data)
+        pbf  = DataFormatter.format_quantity(h.get("pesoBruto"), 15)
+        plf2 = DataFormatter.format_quantity(h.get("pesoLiquido"), 15)
+        fmap = {
+            "numeroDUIMP":duimp_fmt,
+            "importadorNome":h.get("nomeImportador",""),
+            "importadorNumero":DataFormatter.format_number(h.get("cnpj"),14),
+            "cargaPesoBruto":pbf,"cargaPesoLiquido":plf2,
+            "cargaPaisProcedenciaNome":h.get("paisProcedencia","").upper(),
+            "totalAdicoes":str(len(self.items_to_use)).zfill(3),
+            "freteTotalReais":DataFormatter.format_input_fiscal(totals["frete"]),
+            "seguroTotalReais":DataFormatter.format_input_fiscal(totals["seguro"]),
+        }
+        if user_inputs:
+            for k in ["cargaDataChegada","dataDesembaraco","dataRegistro","conhecimentoCargaEmbarqueData",
+                      "cargaPesoBruto","cargaPesoLiquido","localDescargaTotalDolares","localDescargaTotalReais",
+                      "localEmbarqueTotalDolares","localEmbarqueTotalReais"]:
+                if k in user_inputs: fmap[k] = user_inputs[k]
 
-        if perguntas_df.empty or not {'grupo', 'classe', 'pergunta'}.issubset(perguntas_df.columns):
-            st.error("Certifique-se de que o arquivo TXT contém as colunas 'grupo', 'classe' e 'pergunta'.")
-            st.write("Conteúdo do arquivo processado:", perguntas_df.head())
-        else:
-            perguntas_hierarquicas = {}
-            for _, row in perguntas_df.iterrows():
-                grupo = row['grupo']
-                classe = str(row['classe'])
-                pergunta = row['pergunta']
+        receitas = [
+            {"code":"0086","val":totals["ii"]},{"code":"1038","val":totals["ipi"]},
+            {"code":"5602","val":totals["pis"]},{"code":"5629","val":totals["cofins"]},
+        ]
+        if user_inputs and user_inputs.get("valorReceita7811","0") not in ("0","000000000000000"):
+            receitas.append({"code":"7811","val":float(user_inputs["valorReceita7811"])})
 
-                if grupo not in perguntas_hierarquicas:
-                    perguntas_hierarquicas[grupo] = {"titulo": grupo, "subitens": {}}
-
-                perguntas_hierarquicas[grupo]["subitens"][classe] = pergunta
-
-            grupos = list(perguntas_hierarquicas.keys())
-            
-            # Criando navegação por grupos
-            with st.sidebar:
-                # ── NOVA LOGO NA SIDEBAR ──────────────────────────────────────
-                st.image(LOGO_URL)
-                # ─────────────────────────────────────────────────────────────
-                st.title("Navegação por Grupos")
-                
-                tab1, tab2, tab3 = st.tabs([ "GESTÃO", "GOVERNANÇA", "SETORES"])
-                
-                with tab1:
-                    if st.button("**📊 Eficiência de Gestão**" if st.session_state.grupo_atual == 0 else "📊 Eficiência de Gestão"):
-                        st.session_state.grupo_atual = 0
-                    if st.button("**🏛️ Estruturas**" if st.session_state.grupo_atual == 1 else "🏛️ Estruturas"):
-                        st.session_state.grupo_atual = 1    
-                
-                with tab2:
-                    if st.button("**🔄 Gestão de Processos**" if st.session_state.grupo_atual == 2 else "🔄 Gestão de Processos"):
-                        st.session_state.grupo_atual = 2
-                    if st.button("**⚠️ Gestão de Riscos**" if st.session_state.grupo_atual == 3 else "⚠️ Gestão de Riscos"):
-                        st.session_state.grupo_atual = 3
-                    if st.button("**📝 Compliance**" if st.session_state.grupo_atual == 4 else "📝 Compliance"):
-                        st.session_state.grupo_atual = 4
-                    if st.button("**📢 Canal de Denúncias**" if st.session_state.grupo_atual == 5 else "📢 Canal de Denúncias"):
-                        st.session_state.grupo_atual = 5
-                    if st.button("**🏢 Governança Corporativa**" if st.session_state.grupo_atual == 6 else "🏢 Governança Corporativa"):
-                        st.session_state.grupo_atual = 6
-                
-                with tab3:
-                    if st.button("**👥 Recursos Humanos**" if st.session_state.grupo_atual == 7 else "👥 Recursos Humanos"):
-                        st.session_state.grupo_atual = 7
-                    if st.button("**💻 Tecnologia da Informação**" if st.session_state.grupo_atual == 8 else "💻 Tecnologia da Informação"):
-                        st.session_state.grupo_atual = 8
-                    if st.button("**🛒 Compras**" if st.session_state.grupo_atual == 9 else "🛒 Compras"):
-                        st.session_state.grupo_atual = 9
-                    if st.button("**📦 Estoques**" if st.session_state.grupo_atual == 10 else "📦 Estoques"):
-                        st.session_state.grupo_atual = 10
-                    if st.button("**💰 Contabilidade e Controle Financeiro**" if st.session_state.grupo_atual == 11 else "💰 Contabilidade e Controle Financeiro"):
-                        st.session_state.grupo_atual = 11
-                    if st.button("**🚚 Logística e Distribuição**" if st.session_state.grupo_atual == 12 else "🚚 Logística e Distribuição"):
-                        st.session_state.grupo_atual = 12
-
-                # Adicionar texto explicativo abaixo dos botões
-                st.write("""
-                Para garantir uma análise mais eficiente e resultados mais assertivos, recomendamos iniciar o diagnóstico pela aba 'Gestão', respondendo aos dois blocos de questões relacionados. 
-                Em seguida, prossiga para 'Governança' e, por fim, 'Setores'. 
-
-                No entanto, caso prefira, você pode navegar diretamente para qualquer aba específica de acordo com suas prioridades ou áreas de interesse imediato.
-                """)
-
-            grupo_atual = st.session_state.grupo_atual
-
-            # Textos introdutórios para cada grupo
-            TEXTO_GRUPO1 = """
-            O preenchimento de uma Matriz de Maturidade de Gestão Financeira é essencial para avaliar a eficiência dos processos financeiros, identificar lacunas e estruturar um plano de melhoria contínua. Ela permite medir o nível de controle sobre orçamento, fluxo de caixa, investimentos e riscos, fornecendo uma visão clara da saúde financeira da empresa. Além disso, facilita a tomada de decisões estratégicas, ajudando a mitigar riscos, otimizar recursos e garantir a sustentabilidade do negócio a longo prazo. Empresas que utilizam essa matriz conseguem se adaptar melhor a mudanças e aprimorar sua competitividade.
-            """
-            TEXTO_GRUPO2 = """
-            A avaliação da maturidade da estrutura de uma organização é um processo essencial para entender o nível de desenvolvimento e a eficácia das práticas de governança, gestão de riscos, compliance e processos organizacionais. Trata-se de um diagnóstico completo que permite identificar pontos fortes, fragilidades e oportunidades de melhoria em diferentes áreas estratégicas.
-            """
-            TEXTO_GRUPO3 = """
-            O preenchimento desta seção permite avaliar a maturidade do programa de Compliance, garantindo que a organização esteja em conformidade com regulamentações e boas práticas éticas. Ajuda a prevenir riscos legais, fortalecer a cultura organizacional e demonstrar compromisso com a integridade corporativa.
-            """
-            TEXTO_GRUPO4 = """
-            Responder a estas perguntas auxilia na identificação, monitoramento e mitigação de riscos que podem impactar a operação. Com uma gestão de riscos eficiente, a empresa minimiza perdas, melhora a tomada de decisão e se prepara para desafios internos e externos, garantindo maior resiliência operacional.
-            """
-            TEXTO_GRUPO5 = """
-            Esta seção permite avaliar a eficiência e a padronização dos processos internos. Um bom gerenciamento de processos melhora a produtividade, reduz desperdícios e assegura entregas consistentes. Além disso, facilita a implementação de melhorias contínuas e a adaptação a novas exigências do mercado.
-            """
-            TEXTO_GRUPO6 = """
-            A governança bem estruturada assegura transparência, ética e eficiência na gestão da empresa. Com este diagnóstico, é possível fortalecer a tomada de decisão, alinhar os interesses das partes interessadas e garantir um crescimento sustentável, reduzindo riscos e aumentando a confiança dos stakeholders.
-            """
-            TEXTO_GRUPO7 = """
-            Esta seção mede a maturidade da gestão de pessoas, garantindo que a empresa valorize seus colaboradores e mantenha um ambiente produtivo e inclusivo. Um RH eficiente melhora a retenção de talentos, impulsiona a inovação e alinha os funcionários à cultura e estratégia organizacional.
-            """
-            TEXTO_GRUPO8 = """
-            Responder a estas perguntas ajuda a avaliar o nível de digitalização e segurança da empresa. Uma TI bem estruturada melhora a eficiência operacional, protege dados sensíveis e impulsiona a inovação, garantindo que a organização esteja preparada para desafios tecnológicos e competitivos.
-            """
-            TEXTO_GRUPO9 = """
-            Esta seção permite identificar boas práticas e oportunidades de melhoria na gestão financeira. Com um controle eficiente, a empresa assegura sustentabilidade, reduz riscos de inadimplência e fraudes, melhora a liquidez e otimiza investimentos, garantindo saúde financeira e crescimento sustentável.
-            """
-            TEXTO_GRUPO10 = """
-            O diagnóstico nesta área assegura que as compras sejam estratégicas, alinhadas às necessidades da empresa e aos melhores preços e prazos. Com processos estruturados, a organização reduz custos, melhora a qualidade dos insumos e fortalece a relação com fornecedores confiáveis.
-            """
-            TEXTO_GRUPO11 = """
-            Avaliar a gestão de estoques permite reduzir desperdícios, evitar faltas e garantir uma operação eficiente. Com controle adequado, a empresa melhora a previsibilidade, reduz custos de armazenagem e assegura disponibilidade de produtos, otimizando o fluxo operacional.
-            """
-            TEXTO_GRUPO12 = """
-            Responder a estas perguntas possibilita otimizar a cadeia logística, garantindo entregas ágeis e redução de custos operacionais. Um bom planejamento melhora o nível de serviço, evita atrasos e assegura eficiência no transporte, impactando positivamente a satisfação do cliente.
-            """
-            TEXTO_GRUPO13 = """
-            Esta seção avalia a transparência e conformidade da contabilidade empresarial. Um controle rigoroso das demonstrações financeiras assegura a correta apuração de resultados, garantindo confiança e credibilidade junto a investidores e órgãos reguladores.
-            """
-
-            # Lista de perguntas obrigatórias
-            perguntas_obrigatorias = [
-                "1.02", "1.06", "1.42", "1.03", "1.13", "1.14", "1.30", "1.12", "1.19", "1.25", "1.41", "1.43", "1.27", "1.35", "1.45", "1.20",
-                "2.10", "2.01", "2.16", "2.23", "2.05", "2.08", "2.25", "2.29", "2.21", "2.22",
-                "3.01", "3.04", "3.08", "3.11", "3.29", "3.38", "3.40", "3.42", "3.43",
-                "4.01", "4.02", "4.03", "4.04", "4.05", "4.06", "4.07", "4.08", "4.09","4.10",
-                "5.01", "5.03", "5.04", "5.07", "5.10", "5.32", "5.35", "5.40"
-                "6.01", "6.02", "6.03", "6.04", "6.05", "6.06", "6.07", "6.08", "6.09","6.10", "6.11", "6.12",
-                "7.01", "7.02", "7.03", "7.04", "7.05", "7.06", "7.07", "7.08", "7.09","7.10",
-                "8.01", "8.02", "8.03", "8.04", "8.05", "8.06", "8.07", "8.08", "8.09","8.10","8.11","8.12","8.13","8.14","8.15","8.16","8.17",
-                "9.01", "9.02", "9.03", "9.04", "9.05", "9.06", "9.07", "9.08", "9.09","9.10",
-                "10.01", "10.02", "10.03", "10.04", "10.05", "10.06", "10.07", "10.08","10.09","10.10",
-                "11.01", "11.02", "11.03", "11.04", "11.05", "11.06", "11.07", "11.08","11.09","11.10",
-                "12.01", "12.02", "12.03", "12.04", "12.05", "12.06", "12.07", "12.08","12.09","12.10",
-                "13.01", "13.02", "13.03", "13.04", "13.05", "13.06", "13.07", "13.08","13.09","13.10"
-            ]
-
-            # Grupos obrigatórios (4, 6, 7, 8, 9, 10, 11, 12, 13)
-            grupos_obrigatorios = [
-                "4 - Gestão de Riscos",
-                "6 - Governança Corporativa",
-                "7 - Recursos Humanos",
-                "8 - Tecnologia da Informação",
-                "9 - Compras",
-                "10 - Estoques",
-                "11 - Contabilidade e Controle Financeiro",
-                "12 - Logística e Distribuição",
-                "13 - Contabilidade e Controle Financeiro"
-            ]
-
-            if grupo_atual < len(grupos):
-                grupo = grupos[grupo_atual]
-
-                # Exibe o texto introdutório correspondente ao grupo atual
-                if grupo.startswith("1 -"):
-                    st.markdown(TEXTO_GRUPO1)
-                elif grupo.startswith("2 -"):
-                    st.markdown(TEXTO_GRUPO2)
-                elif grupo.startswith("3 -"):
-                    st.markdown(TEXTO_GRUPO3)
-                elif grupo.startswith("4 -"):
-                    st.markdown(TEXTO_GRUPO4)
-                elif grupo.startswith("5 -"):
-                    st.markdown(TEXTO_GRUPO5)
-                elif grupo.startswith("6 -"):
-                    st.markdown(TEXTO_GRUPO6)
-                elif grupo.startswith("7 -"):
-                    st.markdown(TEXTO_GRUPO7)
-                elif grupo.startswith("8 -"):
-                    st.markdown(TEXTO_GRUPO8)
-                elif grupo.startswith("9 -"):
-                    st.markdown(TEXTO_GRUPO9)
-                elif grupo.startswith("10 -"):
-                    st.markdown(TEXTO_GRUPO10)
-                elif grupo.startswith("11 -"):
-                    st.markdown(TEXTO_GRUPO11)
-                elif grupo.startswith("12 -"):
-                    st.markdown(TEXTO_GRUPO12)
-                elif grupo.startswith("13 -"):
-                    st.markdown(TEXTO_GRUPO13)
-
-                st.write(f"### {perguntas_hierarquicas[grupo]['titulo']}")
-                
-                # Verifica se todas as perguntas obrigatórias foram respondidas
-                todas_obrigatorias_preenchidas = True
-                obrigatorias_no_grupo = []
-                
-                for subitem, subpergunta in perguntas_hierarquicas[grupo]["subitens"].items():
-                    if subitem in perguntas_obrigatorias:
-                        obrigatorias_no_grupo.append(subitem)
-                        if st.session_state.respostas.get(subitem, "Selecione") == "Selecione":
-                            todas_obrigatorias_preenchidas = False
-
-                # Adicionando verificações para evitar erros ao acessar chaves inexistentes
-                for subitem, subpergunta in perguntas_hierarquicas[grupo]["subitens"].items():
-                    if subitem not in st.session_state.respostas:
-                        st.session_state.respostas[subitem] = "Selecione"  # Inicializa com "Selecione"
-
-                for subitem, subpergunta in perguntas_hierarquicas[grupo]["subitens"].items():
-                    if subitem not in st.session_state.respostas:
-                        st.session_state.respostas[subitem] = "Selecione"  # Inicializa com "Selecione"
-
-                # Dividindo as perguntas em blocos de 10
-                subitens = list(perguntas_hierarquicas[grupo]["subitens"].items())
-                blocos = [subitens[i:i + 10] for i in range(0, len(subitens), 10)]
-
-                for idx, bloco in enumerate(blocos):
-                    # Verifica se todas as perguntas do bloco foram respondidas
-                    bloco_preenchido = all(
-                        st.session_state.respostas.get(subitem, "Selecione") != "Selecione"
-                        for subitem, _ in bloco
-                    )
-                    # Destaca o bloco se estiver preenchido
-                    bloco_titulo = f"Bloco {idx + 1} de perguntas"
-                    if bloco_preenchido:
-                        bloco_titulo = f"✅ **:green[{bloco_titulo}]**"
-                    with st.expander(bloco_titulo, expanded=bloco_preenchido):
-                        for subitem, subpergunta in bloco:
-                            # Adiciona check se a pergunta foi respondida
-                            respondida = st.session_state.respostas.get(subitem, "Selecione") != "Selecione"
-                            check = " ✔️" if respondida else ""
-                            if subitem in perguntas_obrigatorias:
-                                pergunta_label = f"**:red[{subitem} - {subpergunta}]{check}** (OBRIGATÓRIO)"  # Destaca em vermelho
-                            else:
-                                pergunta_label = f"{subitem} - {subpergunta}{check}"
-
-                            resposta = st.selectbox(
-                                pergunta_label,
-                                options=list(mapeamento_respostas.keys()),
-                                index=list(mapeamento_respostas.keys()).index(st.session_state.respostas[subitem])
-                            )
-                            st.session_state.respostas[subitem] = resposta
-
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    if st.button("⬅️ Voltar"):
-                        if st.session_state.grupo_atual > 0:
-                            st.session_state.grupo_atual -= 1
-                            st.session_state.mostrar_graficos = False
-                with col2:
-                    if st.button("➡️ Prosseguir"):
-                        # Verifica se todas as perguntas obrigatórias do grupo atual foram respondidas
-                        obrigatorias_no_grupo = [
-                            subitem for subitem in perguntas_hierarquicas[grupo]["subitens"].keys()
-                            if subitem in perguntas_obrigatorias
-                        ]
-                        todas_obrigatorias_preenchidas = all(
-                            st.session_state.respostas.get(subitem, "Selecione") != "Selecione"
-                            for subitem in obrigatorias_no_grupo
-                        )
-
-                        if not todas_obrigatorias_preenchidas:
-                            st.error(f"Ops...! Para concluir esse grupo você precisa revisar todas as perguntas obrigatórias: {', '.join(obrigatorias_no_grupo)}")
+        for tag, dval in FOOTER_TAGS.items():
+            if tag == "embalagem" and user_inputs:
+                parent = etree.SubElement(self.duimp, tag)
+                for sf in dval:
+                    v = user_inputs.get("quantidadeVolume", sf["default"]) if sf["tag"]=="quantidadeVolume" else sf["default"]
+                    etree.SubElement(parent, sf["tag"]).text = v
+                continue
+            if tag == "pagamento":
+                agencia = user_inputs.get("agenciaPagamento","3715") if user_inputs else "3715"
+                banco   = user_inputs.get("bancoPagamento","341")   if user_inputs else "341"
+                for rec in receitas:
+                    if rec["val"] > 0:
+                        pag = etree.SubElement(self.duimp, "pagamento")
+                        etree.SubElement(pag, "agenciaPagamento").text = agencia
+                        etree.SubElement(pag, "bancoPagamento").text   = banco
+                        etree.SubElement(pag, "codigoReceita").text    = rec["code"]
+                        if rec["code"]=="7811" and user_inputs:
+                            etree.SubElement(pag, "valorReceita").text = user_inputs["valorReceita7811"].zfill(15)
                         else:
-                            # Avança para o próximo grupo
-                            st.session_state.grupo_atual += 1
-                            st.session_state.mostrar_graficos = False
-                            st.success("Você avançou para o próximo grupo.")
-                with col3:
-                    if st.button("💾 Salvar Progresso"):
-                        salvar_respostas(st.session_state.nome, st.session_state.email, st.session_state.respostas)
-                    # Substituir os dois botões por um só
-                    if st.button("📊 Gerar Gráficos e Enviar por Email"):
-                        fig_original, fig_normalizado = gerar_graficos_radar(perguntas_hierarquicas, st.session_state.respostas)
-                        if fig_original is None or fig_normalizado is None:
-                            st.error("Os gráficos não foram gerados corretamente. Verifique os dados de entrada.")
-                        else:
-                            excel_data = exportar_questionario(st.session_state.respostas, perguntas_hierarquicas)
-                            if enviar_email(st.session_state.email, excel_data, fig_original, fig_normalizado):
-                                st.success(f"Relatório enviado com sucesso para o email {st.session_state.email}!")
-                            st.session_state.mostrar_graficos = True
-
-                if st.session_state.mostrar_graficos:
-                    # Mensagem de Relatório de Progresso
-                    grupo_atual_nome = grupos[st.session_state.grupo_atual]
-                    respostas_numericas = {k: mapeamento_respostas[v] for k, v in st.session_state.respostas.items()}
-                    soma_respostas = sum(respostas_numericas[subitem] for subitem in perguntas_hierarquicas[grupo_atual_nome]["subitens"].keys())
-                    num_perguntas = len(perguntas_hierarquicas[grupo_atual_nome]["subitens"])
-                    if num_perguntas > 0:
-                        valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
-                        nivel_atual = ""
-                        if valor_percentual < 26:
-                            nivel_atual = "INICIAL"
-                        elif valor_percentual < 51:
-                            nivel_atual = "ORGANIZAÇÃO"
-                        elif valor_percentual < 71:
-                            nivel_atual = "CONSOLIDAÇÃO"
-                        elif valor_percentual < 90:
-                            nivel_atual = "OTIMIZAÇÃO"
-                        elif valor_percentual >= 91:
-                            nivel_atual = "EXCELÊNCIA"
-
-                        # Determinar os próximos blocos
-                        proximos_blocos = grupos[st.session_state.grupo_atual + 1:] if st.session_state.grupo_atual + 1 < len(grupos) else []
-                        proximos_blocos_texto = ", ".join(proximos_blocos) if proximos_blocos else "Nenhum bloco restante."
-
-                        # Exibir a mensagem
-                        st.markdown(f"""
-                        ### Relatório de Progresso
-
-                        Você completou o Bloco **{grupo_atual_nome}**. Os resultados indicam que o seu nível de maturidade neste bloco é classificado como: **{nivel_atual}**.
-
-                        Para aprofundarmos a análise e oferecermos insights mais estratégicos, recomendamos que você complete também:
-
-                        **{proximos_blocos_texto}**
-
-                        Nossos consultores especializados receberão este relatório e entrarão em contato para agendar uma discussão personalizada. Juntos, identificaremos oportunidades de melhoria e traçaremos os próximos passos para otimizar os processos da sua organização.
-                        """)
-
-                    # Gerar gráficos
-                    fig_original, fig_normalizado = gerar_graficos_radar(perguntas_hierarquicas, st.session_state.respostas)
-                    if fig_original and fig_normalizado:
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.plotly_chart(fig_original, use_container_width=True)
-                        with col2:
-                            st.plotly_chart(fig_normalizado, use_container_width=True)
-
-                        # Calcular e exibir o nível atual apenas para o grupo atual
-                        mostrar_nivel_atual_por_grupo(grupo_atual_nome, valor_percentual)
+                            etree.SubElement(pag, "valorReceita").text = DataFormatter.format_input_fiscal(rec["val"])
+                continue
+            if tag in fmap:
+                etree.SubElement(self.duimp, tag).text = fmap[tag]; continue
+            if user_inputs and tag in user_inputs:
+                etree.SubElement(self.duimp, tag).text = user_inputs[tag]; continue
+            if isinstance(dval, list):
+                parent = etree.SubElement(self.duimp, tag)
+                for sf in dval: etree.SubElement(parent, sf["tag"]).text = sf["default"]
+            elif isinstance(dval, dict):
+                parent = etree.SubElement(self.duimp, tag)
+                etree.SubElement(parent, dval["tag"]).text = dval["default"]
             else:
-                st.write("### Todas as perguntas foram respondidas!")
-                if st.button("Gerar Gráfico Final"):
-                    # Verifica se todas as perguntas obrigatórias foram respondidas
-                    todas_obrigatorias_respondidas = True
-                    obrigatorias_nao_respondidas = []
-                    
-                    for pergunta in perguntas_obrigatorias:
-                        if pergunta not in st.session_state.respostas or st.session_state.respostas.get(pergunta, "Selecione") == "Selecione":
-                            todas_obrigatorias_respondidas = False
-                            obrigatorias_nao_respondidas.append(pergunta)
-                    
-                    # Verifica se todos os grupos obrigatórios foram completamente respondidos
-                    grupos_obrigatorios_completos = True
-                    grupos_incompletos = []
-                    
-                    for grupo_obrigatorio in grupos_obrigatorios:
-                        if grupo_obrigatorio in perguntas_hierarquicas:
-                            for subitem in perguntas_hierarquicas[grupo_obrigatorio]["subitens"].keys():
-                                if subitem not in st.session_state.respostas or st.session_state.respostas.get(subitem, "Selecione") == "Selecione":
-                                    grupos_obrigatorios_completos = False
-                                    grupos_incompletos.append(grupo_obrigatorio)
-                                    break
-                    
-                    if not todas_obrigatorias_respondidas or not grupos_obrigatorios_completos:
-                        mensagem_erro = []
-                        if not todas_obrigatorias_respondidas:
-                            mensagem_erro.append(f"Perguntas obrigatórias não respondidas: {', '.join(obrigatorias_nao_respondidas)}")
-                        if not grupos_obrigatorios_completos:
-                            mensagem_erro.append(f"Grupos obrigatórios incompletos: {', '.join(set(grupos_incompletos))}")
-                        st.error(" | ".join(mensagem_erro))
+                etree.SubElement(self.duimp, tag).text = fmap.get(tag, dval)
+
+        xml_bytes = etree.tostring(self.root, pretty_print=True, encoding="UTF-8", xml_declaration=False)
+        return b'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml_bytes
+
+
+# ==============================================================================
+# PARTE 6 — _merge_app2_items + _render_totais_grade
+# ==============================================================================
+def _merge_app2_items(df_dest: pd.DataFrame, itens: list) -> tuple:
+    src_map: Dict[int, Dict] = {}
+    for item in itens:
+        try: src_map[int(item['numero_item'])] = item
+        except Exception: pass
+
+    count, not_found = 0, []
+    for idx, row in df_dest.iterrows():
+        try:
+            num = int(str(row['numeroAdicao']).strip())
+            if num not in src_map: not_found.append(num); continue
+            src = src_map[num]
+            df_dest.at[idx,'NUMBER']           = src.get('codigo_interno','')
+            df_dest.at[idx,'Frete (R$)']       = src.get('frete_internacional',0.0)
+            df_dest.at[idx,'Seguro (R$)']      = src.get('seguro_internacional',0.0)
+            df_dest.at[idx,'Aduaneiro (R$)']   = src.get('aduaneiro_reais',
+                                                   src.get('valorAduaneiroReal',
+                                                   src.get('local_aduaneiro',0.0)))
+            df_dest.at[idx,'II (R$)']          = src.get('ii_valor_devido',0.0)
+            df_dest.at[idx,'II Base (R$)']     = src.get('ii_base_calculo',
+                                                   src.get('aduaneiro_reais',
+                                                   src.get('valorAduaneiroReal',0.0)))
+            df_dest.at[idx,'II Alíq. (%)']     = src.get('ii_aliquota',0.0)
+            df_dest.at[idx,'IPI (R$)']         = src.get('ipi_valor_devido',0.0)
+            df_dest.at[idx,'IPI Base (R$)']    = src.get('ipi_base_calculo',0.0)
+            df_dest.at[idx,'IPI Alíq. (%)']    = src.get('ipi_aliquota',0.0)
+            df_dest.at[idx,'PIS (R$)']         = src.get('pis_valor_devido',0.0)
+            df_dest.at[idx,'PIS Base (R$)']    = src.get('pis_base_calculo',0.0)
+            df_dest.at[idx,'PIS Alíq. (%)']    = src.get('pis_aliquota',0.0)
+            df_dest.at[idx,'COFINS (R$)']      = src.get('cofins_valor_devido',0.0)
+            df_dest.at[idx,'COFINS Base (R$)'] = src.get('cofins_base_calculo',0.0)
+            df_dest.at[idx,'COFINS Alíq. (%)'] = src.get('cofins_aliquota',0.0)
+            count += 1
+        except Exception: continue
+    return df_dest, count, not_found
+
+
+def _render_totais_grade(df: pd.DataFrame):
+    def _s(col): return pd.to_numeric(df[col], errors='coerce').sum() if col in df.columns else 0
+    t1,t2,t3,t4,t5,t6 = st.columns(6)
+    t1.metric("II Total",     f"R$ {_s('II (R$)'):,.2f}")
+    t2.metric("IPI Total",    f"R$ {_s('IPI (R$)'):,.2f}")
+    t3.metric("PIS Total",    f"R$ {_s('PIS (R$)'):,.2f}")
+    t4.metric("COFINS Total", f"R$ {_s('COFINS (R$)'):,.2f}")
+    t5.metric("Frete Total",  f"R$ {_s('Frete (R$)'):,.2f}")
+    t6.metric("Seguro Total", f"R$ {_s('Seguro (R$)'):,.2f}")
+
+
+# ==============================================================================
+# PARTE 7 — SISTEMA INTEGRADO DUIMP
+# ==============================================================================
+def sistema_integrado_duimp():
+    page_header("📊", "Sistema Integrado DUIMP 2026",
+                "Upload · Vinculação · Conferência · Geração de XML 8686")
+
+    tab_up, tab_conf, tab_xml = st.tabs([
+        "📂  Upload & Vinculação",
+        "📋  Conferência",
+        "💾  Exportar XML",
+    ])
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 1 — UPLOAD & VINCULAÇÃO
+    # ══════════════════════════════════════════════════════════════════════
+    with tab_up:
+        # ── Seletor de layout ─────────────────────────────────────────────
+        section_title("⚙️ Formato do Arquivo de Tributos (APP2)")
+        col_radio, col_badge = st.columns([3, 1], gap="large")
+
+        with col_radio:
+            layout_choice = st.radio(
+                "Selecione o layout do APP2",
+                options=[
+                    "🔵  Sigraweb — Conferência do Processo Detalhado (layout novo)",
+                    "🟠  Extrato DUIMP — Itens da DUIMP (layout antigo)",
+                ],
+                index=0 if st.session_state["layout_app2"] == "sigraweb" else 1,
+                key="layout_radio",
+                horizontal=False,
+            )
+            novo = "sigraweb" if layout_choice.startswith("🔵") else "extrato_duimp"
+            if novo != st.session_state["layout_app2"]:
+                st.session_state["layout_app2"]     = novo
+                st.session_state["parsed_sigraweb"] = None
+                st.session_state["merged_df"]       = None
+                st.rerun()
+
+        with col_badge:
+            is_sgw = st.session_state["layout_app2"] == "sigraweb"
+            bc  = "lbadge" if is_sgw else "lbadge amber"
+            btx = "🔵 Sigraweb (ativo)" if is_sgw else "🟠 Extrato DUIMP (ativo)"
+            ph(f'<div class="{bc}">{btx}</div>')
+
+        st.divider()
+
+        # ── Upload ────────────────────────────────────────────────────────
+        section_title("📂 Carregar Arquivos")
+        c1, c2 = st.columns(2, gap="large")
+
+        with c1:
+            ph("""<div class="uzone">
+                <div class="uzone-icon">📄</div>
+                <div class="uzone-title">Passo 1 — Extrato DUIMP</div>
+                <div class="uzone-sub">Siscomex · PDF</div></div>""")
+            file_duimp = st.file_uploader("Arquivo DUIMP (PDF)", type="pdf", key="u1")
+
+        with c2:
+            lbl2 = "Sigraweb · Conferência Detalhada" if is_sgw else "Extrato DUIMP · Itens"
+            ph(f"""<div class="uzone">
+                <div class="uzone-icon">📑</div>
+                <div class="uzone-title">Passo 2 — {lbl2}</div>
+                <div class="uzone-sub">PDF</div></div>""")
+            key2  = "Arquivo Sigraweb (PDF)" if is_sgw else "Arquivo Extrato DUIMP (PDF)"
+            file_app2 = st.file_uploader(key2, type="pdf", key="u2")
+
+        # ── Processar APP1 (DUIMP) ────────────────────────────────────────
+        # Salva em tempfile antes de passar ao DuimpPDFParser.
+        # Evita carregar o PDF inteiro em RAM duas vezes.
+        if file_duimp:
+            if (st.session_state["parsed_duimp"] is None or
+                    file_duimp.name != getattr(st.session_state.get("last_duimp"),"name","")):
+                _td_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as _td:
+                        _td.write(file_duimp.read())
+                        _td_path = _td.name
+
+                    p = DuimpPDFParser(_td_path)   # path, não bytes
+                    p.preprocess(); p.extract_header(); p.extract_items()
+                    st.session_state["parsed_duimp"] = p
+                    st.session_state["last_duimp"]   = file_duimp
+                    df = pd.DataFrame(p.items)
+                    for col in ["NUMBER","Frete (R$)","Seguro (R$)",
+                                "II (R$)","II Base (R$)","II Alíq. (%)",
+                                "IPI (R$)","IPI Base (R$)","IPI Alíq. (%)",
+                                "PIS (R$)","PIS Base (R$)","PIS Alíq. (%)",
+                                "COFINS (R$)","COFINS Base (R$)","COFINS Alíq. (%)","Aduaneiro (R$)"]:
+                        df[col] = 0.00 if col != "NUMBER" else ""
+                    st.session_state["merged_df"] = df
+                    status_ok(f"DUIMP lida — {len(p.items)} adições encontradas.")
+                except Exception as e:
+                    st.error(f"Erro ao ler DUIMP: {e}")
+                finally:
+                    if _td_path and os.path.exists(_td_path):
+                        try: os.unlink(_td_path)
+                        except Exception: pass
+
+        # ── Processar APP2 ────────────────────────────────────────────────
+        if file_app2 and st.session_state["parsed_sigraweb"] is None:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
+                tmp.write(file_app2.getvalue()); tmp_path = tmp.name
+            try:
+                parser_a2 = SigrawebPDFParser() if is_sgw else HafelePDFParser()
+                doc_a2    = parser_a2.parse_pdf(tmp_path)
+                st.session_state["parsed_sigraweb"] = doc_a2
+                n = len(doc_a2['itens'])
+                if n > 0:
+                    lname = "Sigraweb" if is_sgw else "Extrato DUIMP"
+                    status_ok(f"{lname} lido — {n} itens encontrados.")
+                    if is_sgw:
+                        cab = doc_a2.get('cabecalho',{})
+                        tot = doc_a2.get('totais',{})
+                        with st.expander("📋 Resumo do Processo (Sigraweb)", expanded=True):
+                            r1,r2,r3,r4 = st.columns(4)
+                            r1.metric("Número DI",       cab.get('numeroDI','N/A'))
+                            r2.metric("Adições",         n)
+                            r3.metric("Peso Bruto (kg)", cab.get('pesoBruto','N/A'))
+                            r4.metric("Via Transporte",  cab.get('viaTransporte','N/A'))
+                            m1,m2,m3,m4 = st.columns(4)
+                            m1.metric("II Total",   f"R$ {tot.get('total_ii',0):,.2f}")
+                            m2.metric("IPI Total",  f"R$ {tot.get('total_ipi',0):,.2f}")
+                            m3.metric("PIS Total",  f"R$ {tot.get('total_pis',0):,.2f}")
+                            m4.metric("COFINS Total",f"R$ {tot.get('total_cofins',0):,.2f}")
+                            n1,n2,n3,n4 = st.columns(4)
+                            n1.metric("Vlr Adu. (R$)", f"R$ {tot.get('total_valor_aduaneiro',0):,.2f}")
+                            n2.metric("Frete (R$)",    f"R$ {tot.get('total_frete',0):,.2f}")
+                            n3.metric("Seguro (R$)",   f"R$ {tot.get('total_seguro',0):,.2f}")
+                            n4.metric("Peso Líq. (kg)",f"{tot.get('peso_liquido_total',0):,.2f}")
                     else:
-                        # Adicionando logs para depuração
-                        try:
-                            respostas = {k: mapeamento_respostas.get(v, 0) for k, v in st.session_state.respostas.items()}
-                            categorias = []
-                            valores = []
-                            valores_normalizados = []
-                            soma_total_respostas = sum(respostas.values())
-                            for item, conteudo in perguntas_hierarquicas.items():
-                                soma_respostas = sum(respostas[subitem] for subitem in conteudo["subitens"].keys())
-                                num_perguntas = len(conteudo["subitens"])
-                                if num_perguntas > 0:
-                                    valor_percentual = (soma_respostas / (num_perguntas * 5)) * 100
-                                    valor_normalizado = (soma_respostas / valor_percentual) * 100 if valor_percentual > 0 else 0
-                                    categorias.append(conteudo["titulo"])
-                                    valores.append(valor_percentual)
-                                    valores_normalizados.append(valor_normalizado)
-                            if len(categorias) != len(valores) or len(categorias) != len(valores_normalizados):
-                                st.error("Erro: As listas de categorias e valores têm tamanhos diferentes.")
-                            else:
-                                if categorias:
-                                    valores_original = valores + valores[:1]
-                                    categorias_original = categorias + categorias[:1]
-                                    fig_original = go.Figure()
-                                    fig_original.add_trace(go.Scatterpolar(
-                                        r=valores_original,
-                                        theta=categorias_original,
-                                        fill='toself',
-                                        name='Gráfico Original'
-                                    ))
-                                    fig_original.update_layout(
-                                        polar=dict(
-                                            radialaxis=dict(
-                                                visible=True,
-                                                range=[0, 100]
-                                            )),
-                                        showlegend=False
-                                    )
-                                    valores_normalizados_fechado = valores_normalizados + valores_normalizados[:1]
-                                    fig_normalizado = go.Figure()
-                                    fig_normalizado.add_trace(go.Scatterpolar(
-                                        r=valores_normalizados_fechado,
-                                        theta=categorias_original,
-                                        fill='toself',
-                                        name='Gráfico Normalizado'
-                                    ))
-                                    fig_normalizado.update_layout(
-                                        polar=dict(
-                                            radialaxis=dict(
-                                                visible=True,
-                                                range=[0, 100]
-                                            )),
-                                        showlegend=False
-                                    )
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        st.plotly_chart(fig_original, use_container_width=True)
-                                        st.write("### Gráfico 1")
-                                        df_grafico_original = pd.DataFrame({'Categoria': categorias, 'Porcentagem': valores})
-                                        total_porcentagem = df_grafico_original['Porcentagem'].sum()
-                                        df_grafico_original.loc['Total'] = ['Total', total_porcentagem]
-                                        st.dataframe(df_grafico_original)
+                        tot = doc_a2.get('totais',{})
+                        with st.expander("📋 Resumo Extrato DUIMP", expanded=True):
+                            e1,e2,e3,e4 = st.columns(4)
+                            e1.metric("Itens",       n)
+                            e2.metric("II Total",    f"R$ {tot.get('total_ii',0):,.2f}")
+                            e3.metric("PIS Total",   f"R$ {tot.get('total_pis',0):,.2f}")
+                            e4.metric("COFINS Total",f"R$ {tot.get('total_cofins',0):,.2f}")
+                else:
+                    st.warning("Nenhum item detectado. Verifique se o layout selecionado está correto.")
+            except Exception as e:
+                st.error(f"Erro ao ler APP2: {e}")
+                st.code(traceback.format_exc())
+            finally:
+                if os.path.exists(tmp_path):
+                    try: os.unlink(tmp_path)
+                    except Exception: pass
 
-                                        if total_porcentagem < 26:
-                                            st.warning("SEU NIVEL É INICIAL")
-                                        elif total_porcentagem < 51:
-                                            st.warning("SEU NIVEL É ORGANIZAÇÃO")
-                                        elif total_porcentagem < 71:
-                                            st.warning("SEU NIVEL É CONSOLIDAÇÃO")
-                                        elif total_porcentagem < 90:
-                                            st.warning("SEU NIVEL É OTIMIZAÇÃO")
-                                        elif total_porcentagem >= 91:
-                                            st.success("SEU NIVEL É EXCELÊNCIA")
-                                    with col2:
-                                        st.plotly_chart(fig_normalizado, use_container_width=True)
-                                        st.write("### Gráfico 2")
-                                        df_grafico_normalizado = pd.DataFrame({'Categoria': categorias, 'Porcentagem Normalizada': valores_normalizados})
-                                        st.dataframe(df_grafico_normalizado)
-                                    
-                                    # Mostrar nível de maturidade completo
-                                    mostrar_nivel_maturidade(total_porcentagem)
-                                    
-                                    excel_data = exportar_questionario(st.session_state.respostas, perguntas_hierarquicas)
-                                    st.download_button(
-                                        label="Exportar para Excel",
-                                        data=excel_data,
-                                        file_name="questionario_preenchido.xlsx",
-                                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                    )
-                        except KeyError as e:
-                            st.error(f"Erro ao acessar chave inexistente: {e}")
-                            st.write("Estado atual das respostas:", st.session_state.respostas)
-                            st.write("Perguntas obrigatórias:", perguntas_obrigatorias)
-                            st.write("Perguntas hierárquicas:", perguntas_hierarquicas)
+        # ── Ações ─────────────────────────────────────────────────────────
+        st.divider()
+        section_title("🔗 Ações")
+        col_btn, col_reset = st.columns([2, 1], gap="large")
+
+        with col_btn:
+            if st.button("🔗 VINCULAR DADOS (Cruzamento Automático)",
+                         type="primary", use_container_width=True):
+                if (st.session_state["merged_df"] is not None and
+                        st.session_state["parsed_sigraweb"] is not None):
+                    try:
+                        doc_a2  = st.session_state["parsed_sigraweb"]
+                        df_dest = st.session_state["merged_df"].copy()
+                        df_dest, count, nf = _merge_app2_items(df_dest, doc_a2['itens'])
+                        st.session_state["merged_df"] = df_dest
+                        st.success(f"✅ **{count}** adições vinculadas.")
+                        if nf: st.warning(f"⚠️ {len(nf)} não encontradas: {nf}")
+                        with st.expander("📊 Resumo da Vinculação"):
+                            _render_totais_grade(df_dest)
+                    except Exception as e:
+                        st.error(f"Erro na vinculação: {e}"); st.code(traceback.format_exc())
+                else:
+                    st.warning("Carregue os dois arquivos antes de vincular.")
+
+        with col_reset:
+            st.markdown('<div style="height:.05rem"></div>', unsafe_allow_html=True)
+            rc1, rc2 = st.columns(2)
+            with rc1:
+                if st.button("🔄 DUIMP", type="secondary", use_container_width=True):
+                    st.session_state["parsed_duimp"] = None
+                    st.session_state["merged_df"]    = None
+                    st.rerun()
+            with rc2:
+                if st.button("🔄 APP2", type="secondary", use_container_width=True):
+                    st.session_state["parsed_sigraweb"] = None; st.rerun()
+            if st.button("🗑️ Limpar Tudo", type="secondary", use_container_width=True):
+                for k in ["parsed_duimp","parsed_sigraweb","merged_df","last_duimp"]:
+                    st.session_state[k] = None
+                st.rerun()
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 2 — CONFERÊNCIA
+    # ══════════════════════════════════════════════════════════════════════
+    with tab_conf:
+        section_title("📋 Conferência e Edição")
+
+        doc_a2 = st.session_state.get("parsed_sigraweb")
+        if doc_a2:
+            itens_a2 = doc_a2.get('itens',[])
+
+            # Cabeçalho Sigraweb
+            if st.session_state["layout_app2"] == "sigraweb":
+                cab = doc_a2.get('cabecalho',{})
+                with st.expander("📄 Dados do Processo — Sigraweb"):
+                    dados = {"Campo":["Número DI","SIGRAWEB ID","Empresa","CNPJ",
+                                      "URF Entrada","Via Transporte","País Procedência",
+                                      "Incoterms","IDT Conhecimento","IDT Master",
+                                      "Data Embarque","Data Chegada","Data Registro",
+                                      "Peso Bruto (kg)","Peso Líquido (kg)","Volumes",
+                                      "Embalagem","Banco","Agência","Taxa EUR","Taxa USD",
+                                      "FOB EUR","FOB BRL","Frete USD","Frete BRL",
+                                      "Seguro USD","Seguro BRL","CIF USD","CIF BRL",
+                                      "Vlr Aduaneiro USD","Vlr Aduaneiro BRL"],
+                             "Valor":[cab.get(k,'') for k in [
+                                 'numeroDI','sigraweb','nomeImportador','cnpj',
+                                 'urf','viaTransporte','paisProcedencia','incoterms',
+                                 'idtConhecimento','idtMaster','dataEmbarque','dataChegada',
+                                 'dataRegistro','pesoBruto','pesoLiquido','volumes',
+                                 'embalagem','banco','agencia','taxaEUR','taxaDolar',
+                                 'fobEUR','fobBRL','freteUSD','freteBRL',
+                                 'seguroUSD','seguroBRL','cifUSD','cifBRL',
+                                 'valorAduaneiroUSD','valorAduaneiroBRL']]}
+                    st.dataframe(pd.DataFrame(dados), use_container_width=True, hide_index=True)
+
+            # Tabela adições APP2
+            lbl_exp = "Sigraweb" if st.session_state["layout_app2"]=="sigraweb" else "Extrato DUIMP"
+            with st.expander(f"📑 Adições Extraídas — {lbl_exp}"):
+                if itens_a2:
+                    rows = [{
+                        'Adição':       it.get('numeroAdicao',''),
+                        'Part Number':  it.get('codigo_interno',''),
+                        'NCM':          it.get('ncm',''),
+                        'Descrição':    str(it.get('descricao',it.get('nome_produto','')))[:55],
+                        'País':         it.get('paisOrigem',''),
+                        'Qtd Est.':     it.get('quantidade',0),
+                        'Qtd Com.':     it.get('quantidade_comercial',0),
+                        'Und':          it.get('unidade',''),
+                        'Peso Líq.':    it.get('pesoLiq',it.get('peso_liquido',0)),
+                        'Vlr Adu. BRL': it.get('aduaneiro_reais',it.get('valorAduaneiroReal',it.get('local_aduaneiro',0))),
+                        'Frete BRL':    it.get('frete_internacional',0),
+                        'Seguro BRL':   it.get('seguro_internacional',0),
+                        'II %':         it.get('ii_aliquota',0),
+                        'II Base':      it.get('ii_base_calculo',0),
+                        'II R$':        it.get('ii_valor_devido',0),
+                        'IPI %':        it.get('ipi_aliquota',0),
+                        'IPI R$':       it.get('ipi_valor_devido',0),
+                        'PIS %':        it.get('pis_aliquota',0),
+                        'PIS R$':       it.get('pis_valor_devido',0),
+                        'COFINS %':     it.get('cofins_aliquota',0),
+                        'COFINS R$':    it.get('cofins_valor_devido',0),
+                        'Total Imp.':   it.get('total_impostos',0),
+                    } for it in itens_a2]
+                    dfa2 = pd.DataFrame(rows)
+                    st.dataframe(dfa2, use_container_width=True, height=340)
+                    tt1,tt2,tt3,tt4,tt5 = st.columns(5)
+                    tt1.metric("Vlr Adu. Total",f"R$ {dfa2['Vlr Adu. BRL'].sum():,.2f}")
+                    tt2.metric("II Total",      f"R$ {dfa2['II R$'].sum():,.2f}")
+                    tt3.metric("IPI Total",     f"R$ {dfa2['IPI R$'].sum():,.2f}")
+                    tt4.metric("PIS Total",     f"R$ {dfa2['PIS R$'].sum():,.2f}")
+                    tt5.metric("COFINS Total",  f"R$ {dfa2['COFINS R$'].sum():,.2f}")
+                else:
+                    st.info("Nenhum item extraído.")
+
+        # ── Grade editável ────────────────────────────────────────────────
+        if st.session_state["merged_df"] is not None:
+            section_title("✏️ Grade de Edição — DUIMP + APP2")
+            ccfg = {
+                "numeroAdicao":     st.column_config.TextColumn("Item",      width="small",  disabled=True),
+                "NUMBER":           st.column_config.TextColumn("Part Number",width="medium"),
+                "ncm":              st.column_config.TextColumn("NCM",       width="small",  disabled=True),
+                "descricao":        st.column_config.TextColumn("Descrição", width="large",  disabled=True),
+                "quantidade":       st.column_config.TextColumn("Qtd Est.",  disabled=True),
+                "quantidade_comercial": st.column_config.TextColumn("Qtd Com.", disabled=True),
+                "unidade":          st.column_config.TextColumn("Unidade",   disabled=True),
+                "pesoLiq":          st.column_config.TextColumn("Peso Líq.", disabled=True),
+                "valorTotal":       st.column_config.TextColumn("FOB",       disabled=True),
+                "Frete (R$)":       st.column_config.NumberColumn(format="R$ %.2f"),
+                "Seguro (R$)":      st.column_config.NumberColumn(format="R$ %.2f"),
+                "Aduaneiro (R$)":   st.column_config.NumberColumn("Vlr Adu.", format="R$ %.2f"),
+                "II Base (R$)":     st.column_config.NumberColumn("II Base",  format="R$ %.2f"),
+                "II Alíq. (%)":     st.column_config.NumberColumn("II %",    format="%.4f"),
+                "II (R$)":          st.column_config.NumberColumn("II R$",   format="R$ %.2f"),
+                "IPI Base (R$)":    st.column_config.NumberColumn("IPI Base", format="R$ %.2f"),
+                "IPI Alíq. (%)":    st.column_config.NumberColumn("IPI %",   format="%.4f"),
+                "IPI (R$)":         st.column_config.NumberColumn("IPI R$",  format="R$ %.2f"),
+                "PIS Base (R$)":    st.column_config.NumberColumn("PIS Base", format="R$ %.2f"),
+                "PIS Alíq. (%)":    st.column_config.NumberColumn("PIS %",   format="%.4f"),
+                "PIS (R$)":         st.column_config.NumberColumn("PIS R$",  format="R$ %.2f"),
+                "COFINS Base (R$)": st.column_config.NumberColumn("COF Base", format="R$ %.2f"),
+                "COFINS Alíq. (%)": st.column_config.NumberColumn("COF %",   format="%.4f"),
+                "COFINS (R$)":      st.column_config.NumberColumn("COF R$",  format="R$ %.2f"),
+            }
+            edf = st.data_editor(st.session_state["merged_df"],
+                                 hide_index=True, column_config=ccfg,
+                                 use_container_width=True, height=540)
+            for tax in ['II','IPI','PIS','COFINS']:
+                bc_ = f"{tax} Base (R$)"; ac_ = f"{tax} Alíq. (%)"; vc_ = f"{tax} (R$)"
+                if bc_ in edf.columns and ac_ in edf.columns:
+                    edf[bc_] = pd.to_numeric(edf[bc_], errors='coerce').fillna(0.0)
+                    edf[ac_] = pd.to_numeric(edf[ac_], errors='coerce').fillna(0.0)
+                    edf[vc_] = edf[bc_] * (edf[ac_] / 100.0)
+            st.session_state["merged_df"] = edf
+            section_title("📊 Totais da Grade")
+            _render_totais_grade(edf)
+        else:
+            empty_state("📋", "Nenhum dado vinculado ainda",
+                        "Carregue os arquivos e execute a vinculação na aba Upload")
+
+    # ══════════════════════════════════════════════════════════════════════
+    # TAB 3 — EXPORTAR XML
+    # ══════════════════════════════════════════════════════════════════════
+    with tab_xml:
+        section_title("⚙️ Configurações do XML Final (Layout 8686)")
+
+        cab_sgw = {}
+        if (st.session_state.get("parsed_sigraweb") and
+                st.session_state["layout_app2"] == "sigraweb"):
+            cab_sgw = st.session_state["parsed_sigraweb"].get("cabecalho",{})
+
+        with st.expander("📅 Datas, Pesos e Locais", expanded=True):
+            xc1, xc2, xc3 = st.columns(3, gap="large")
+            with xc1:
+                st.markdown("**Quantidade & Datas**")
+                _v = cab_sgw.get('volumes','')
+                inp_vol    = st.text_input("Qtd. Volume",      value=str(_v).zfill(5) if _v else '00001')
+                inp_cheg   = st.text_input("Data Chegada",     value=cab_sgw.get('dataChegadaISO','20251120') or '20251120')
+                inp_desemb = st.text_input("Data Desembaraço", value=cab_sgw.get('dataRegistro','20251124') or '20251124')
+                inp_reg    = st.text_input("Data Registro",    value=cab_sgw.get('dataRegistro','20251124') or '20251124')
+                inp_emb    = st.text_input("Data Embarque",    value=cab_sgw.get('dataEmbarqueISO','20251025') or '20251025')
+            with xc2:
+                st.markdown("**Pesos (formato XML)**")
+                _pb = DataFormatter.format_quantity(cab_sgw.get('pesoBruto','0'),15) if cab_sgw.get('pesoBruto') else '000000000000000'
+                _pl = DataFormatter.format_quantity(cab_sgw.get('pesoLiquido','0'),15) if cab_sgw.get('pesoLiquido') else '000000000000000'
+                inp_pb  = st.text_input("Peso Bruto (XML)",   value=_pb)
+                inp_pl  = st.text_input("Peso Líquido (XML)", value=_pl)
+                st.markdown("**Locais (R$ / US$)**")
+                inp_ldd = st.text_input("Descarga US$", value="000000000000000")
+                inp_ldr = st.text_input("Descarga R$",  value="000000000000000")
+                inp_led = st.text_input("Embarque US$", value="000000000000000")
+                inp_ler = st.text_input("Embarque R$",  value="000000000000000")
+            with xc3:
+                st.markdown("**Pagamento & Conhecimento**")
+                inp_ag  = st.text_input("Agência",         value=cab_sgw.get('agencia','3715') or '3715')
+                inp_bco = st.text_input("Banco",           value="341")
+                inp_idc = st.text_input("IDT Conhecimento",value=cab_sgw.get('idtConhecimento','CE123456') or 'CE123456')
+                inp_idm = st.text_input("IDT Master",      value=cab_sgw.get('idtMaster','CE123456') or 'CE123456')
+                st.markdown("**Receita 7811**")
+                inp_r78 = st.text_input("Valor 7811", value="000000000000000")
+
+        user_xml = {
+            "quantidadeVolume":              inp_vol,
+            "cargaDataChegada":              inp_cheg,
+            "dataDesembaraco":               inp_desemb,
+            "dataRegistro":                  inp_reg,
+            "conhecimentoCargaEmbarqueData": inp_emb,
+            "cargaPesoBruto":                inp_pb,
+            "cargaPesoLiquido":              inp_pl,
+            "agenciaPagamento":              inp_ag,
+            "bancoPagamento":                inp_bco,
+            "valorReceita7811":              inp_r78,
+            "localDescargaTotalDolares":     inp_ldd,
+            "localDescargaTotalReais":       inp_ldr,
+            "localEmbarqueTotalDolares":     inp_led,
+            "localEmbarqueTotalReais":       inp_ler,
+            "conhecimentoCargaId":           inp_idc,
+            "conhecimentoCargaIdMaster":     inp_idm,
+        }
+
+        st.divider()
+
+        if st.session_state["merged_df"] is not None:
+            if st.button("⚙️ Gerar XML (Layout 8686)", type="primary",
+                         use_container_width=True):
+                try:
+                    p       = st.session_state["parsed_duimp"]
+                    records = st.session_state["merged_df"].to_dict("records")
+                    for i, item in enumerate(p.items):
+                        if i < len(records): item.update(records[i])
+                    builder   = XMLBuilder(p)
+                    xml_bytes = builder.build(user_inputs=user_xml)
+                    duimp_num = p.header.get("numeroDUIMP","0000").replace("/","-")
+                    st.download_button("⬇️ Baixar XML", data=xml_bytes,
+                                       file_name=f"DUIMP_{duimp_num}_INTEGRADO.xml",
+                                       mime="text/xml", use_container_width=True)
+                    st.success("✅ XML gerado com sucesso!")
+                    with st.expander("👁️ Preview XML"):
+                        st.code(xml_bytes.decode('utf-8', errors='ignore')[:3000], language='xml')
+                except Exception as e:
+                    st.error(f"Erro: {e}"); st.code(traceback.format_exc())
+        else:
+            empty_state("💾", "Nenhum dado disponível",
+                        "Realize o upload e a vinculação antes de gerar o XML")
+
+
+# ==============================================================================
+# APLICAÇÃO PRINCIPAL
+# ==============================================================================
+def main():
+    load_css()
+
+    ph("""
+    <div class="hero">
+        <img src="https://raw.githubusercontent.com/DaniloNs-creator/final/7ea6ab2a610ef8f0c11be3c34f046e7ff2cdfc6a/haefele_logo.png"
+             class="hero-logo" alt="Häfele">
+        <h1 class="hero-title">Sistema de Processamento Unificado 2026</h1>
+        <p class="hero-sub">TXT · CT-e · DUIMP — Análise e geração de XML fiscal</p>
+        <div class="hero-chips">
+            <span class="chip">📄 TXT</span>
+            <span class="chip">🚚 CT-e</span>
+            <span class="chip">📊 DUIMP</span>
+            <span class="chip">🔵 Sigraweb</span>
+            <span class="chip">🟠 Extrato DUIMP</span>
+            <span class="chip">⚙️ XML 8686</span>
+        </div>
+    </div>""")
+
+    tab1, tab2, tab3 = st.tabs([
+        "📄  Processador TXT",
+        "🚚  Processador CT-e",
+        "📊  Sistema Integrado DUIMP",
+    ])
+    with tab1: processador_txt()
+    with tab2: processador_cte()
+    with tab3: sistema_integrado_duimp()
+
+
+if __name__ == "__main__":
+    try:
+        main()
     except Exception as e:
-        st.error(f"Ocorreu um erro ao carregar o arquivo: {e}")
-
-# Garantir que perguntas_hierarquicas esteja definido
-if 'perguntas_hierarquicas' not in locals():
-    perguntas_hierarquicas = {}
-
-# Garantir que perguntas_obrigatorias esteja definido
-if 'perguntas_obrigatorias' not in locals():
-    perguntas_obrigatorias = []
-
-# Garantir que todas as perguntas obrigatórias sejam inicializadas no dicionário de respostas
-for grupo, conteudo in perguntas_hierarquicas.items():
-    for subitem in conteudo["subitens"].keys():
-        if subitem not in st.session_state.respostas:
-            st.session_state.respostas[subitem] = "Selecione"  # Inicializa com "Selecione"
-
-# Adicionando verificações para evitar erros ao acessar chaves inexistentes
-try:
-    respostas = {k: mapeamento_respostas.get(v, 0) for k, v in st.session_state.respostas.items()}
-except KeyError as e:
-    st.error(f"Erro ao acessar chave inexistente: {e}")
-    st.write("Estado atual das respostas:", st.session_state.respostas)
-    st.write("Perguntas hierárquicas:", perguntas_hierarquicas)
+        st.error(f"Erro inesperado: {str(e)}")
+        st.code(traceback.format_exc())
