@@ -1,13 +1,9 @@
 import streamlit as st
 from datetime import datetime
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 from typing import Optional, Dict, Any
-import chardet
 from io import BytesIO
 import time
-import xml.etree.ElementTree as ET
 import os
 import traceback
 import numpy as np
@@ -15,31 +11,21 @@ import fitz
 import pdfplumber
 import re
 from lxml import etree
+import xml.etree.ElementTree as ET
 import tempfile
 import logging
 import gc
-import sqlite3
-from datetime import timedelta, date
-from typing import List, Tuple
 import io
-import contextlib
-import base64
-import hashlib
-import xml.dom.minidom
 from pathlib import Path
-import random
+import zipfile
+import inspect
 
-# ==============================================================================
-# CONFIGURAÇÃO AUTOMÁTICA DO SERVIDOR STREAMLIT
-# Suporta PDFs gigantes — até 2 GB
-# ==============================================================================
-_PDF_CHUNK_PAGES = 50  # Páginas processadas por lote — evita OOM em PDFs de 1000+ páginas
+_PDF_CHUNK_PAGES = 20
 
 def setup_streamlit_config():
     try:
         os.makedirs(".streamlit", exist_ok=True)
         config_path = os.path.join(".streamlit", "config.toml")
-        # Sempre sobrescreve para garantir os limites corretos
         with open(config_path, "w", encoding="utf-8") as f:
             f.write("[server]\nmaxUploadSize = 2000\nmaxMessageSize = 2000\n")
     except Exception:
@@ -47,9 +33,6 @@ def setup_streamlit_config():
 
 setup_streamlit_config()
 
-# ==============================================================================
-# CONFIGURAÇÃO INICIAL
-# ==============================================================================
 st.set_page_config(
     page_title="Sistema de Processamento Unificado 2026",
     page_icon="📊",
@@ -62,9 +45,19 @@ CTE_NAMESPACES = {'cte': 'http://www.portalfiscal.inf.br/cte'}
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ==============================================================================
-# SESSION STATE
-# ==============================================================================
+def _w(stretch: bool = True):
+    try:
+        sig = inspect.signature(st.dataframe)
+        if "width" in sig.parameters and "use_container_width" not in sig.parameters:
+            return {"width": "stretch" if stretch else "content"}
+        else:
+            return {"use_container_width": stretch}
+    except Exception:
+        return {"use_container_width": stretch}
+
+_WS = _w(True)
+_WC = _w(False)
+
 _defaults = {
     'selected_xml': None, 'cte_data': None,
     'parsed_duimp': None, 'parsed_sigraweb': None,
@@ -75,7 +68,6 @@ for k, v in _defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ==============================================================================
 # HELPERS UI
 # ==============================================================================
 def show_loading_animation(message="Processando..."):
@@ -87,25 +79,27 @@ def show_loading_animation(message="Processando..."):
         pb.empty()
 
 def show_processing_animation(message="Analisando dados..."):
-    ph = st.empty()
-    with ph.container():
+    ph_container = st.empty()
+    with ph_container.container():
         _, c, _ = st.columns([1, 2, 1])
         with c:
             st.info(f"⏳ {message}")
             sp = st.empty()
             chars = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"]
             for i in range(20):
-                sp.markdown(f"<div style='text-align:center;font-size:24px'>{chars[i%8]}</div>",
-                            unsafe_allow_html=True)
+                sp.markdown(
+                    f"<div style='text-align:center;font-size:24px'>{chars[i%8]}</div>",
+                    unsafe_allow_html=True,
+                )
                 time.sleep(0.1)
-    ph.empty()
+    ph_container.empty()
 
 def show_success_animation(message="Concluído!"):
-    ph = st.empty()
-    with ph.container():
+    ph_container = st.empty()
+    with ph_container.container():
         st.success(f"✅ {message}")
         time.sleep(1.2)
-    ph.empty()
+    ph_container.empty()
 
 def ph(html: str):
     """Shortcut for st.markdown with unsafe_allow_html=True"""
@@ -113,10 +107,12 @@ def ph(html: str):
 
 def page_header(icon: str, title: str, sub: str):
     ph(f"""
-    <div class="ph">
+    <div class="ph-hdr">
         <span class="ph-icon">{icon}</span>
-        <div><div class="ph-title">{title}</div>
-        <div class="ph-sub">{sub}</div></div>
+        <div>
+            <div class="ph-title">{title}</div>
+            <div class="ph-sub">{sub}</div>
+        </div>
     </div>""")
 
 def section_title(text: str):
@@ -136,652 +132,475 @@ def status_ok(text: str):
 def status_warn(text: str):
     ph(f'<div class="sbox sbox-warn">⚠️ {text}</div>')
 
-# ==============================================================================
-# CSS
-# ==============================================================================
 def load_css():
     ph("""<style>
-    /* ── tokens ── */
+    /* ── Google Fonts ─────────────────────────────────────── */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+    /* ── Design Tokens ────────────────────────────────────── */
     :root{
-        --navy:#0F172A; --blue:#1E3A8A; --blue-m:#2563EB; --blue-l:#3B82F6;
-        --blue-bg:#EFF6FF; --blue-b:#BFDBFE;
-        --green:#059669; --green-bg:#D1FAE5;
-        --amber:#D97706; --amber-bg:#FEF3C7;
+        --navy:#0A0F1E;
+        --blue-dark:#0F2040;
+        --blue:#1E3A8A;
+        --blue-m:#2563EB;
+        --blue-l:#3B82F6;
+        --blue-xl:#60A5FA;
+        --blue-bg:#EFF6FF;
+        --blue-b:#BFDBFE;
+        --green:#059669;
+        --green-l:#10B981;
+        --green-bg:#D1FAE5;
+        --amber:#D97706;
+        --amber-bg:#FEF3C7;
         --red:#DC2626;
-        --bg:#F1F5F9; --surface:#FFFFFF;
-        --border:#E2E8F0; --muted:#64748B;
-        --r:8px; --r-lg:16px; --r-xl:22px;
-        --sh0:0 1px 2px rgba(0,0,0,.05);
-        --sh1:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.05);
-        --sh2:0 4px 16px rgba(0,0,0,.10);
-        --sh3:0 12px 36px rgba(0,0,0,.14);
-        --tr:all .18s cubic-bezier(.4,0,.2,1);
-        --glow:0 0 0 3px rgba(59,130,246,.20);
+        --red-bg:#FEE2E2;
+        --bg:#F0F4FA;
+        --surface:#FFFFFF;
+        --surface2:#F8FAFC;
+        --border:#E2E8F0;
+        --border-strong:#CBD5E1;
+        --muted:#64748B;
+        --muted2:#94A3B8;
+        --text:#0F172A;
+        --r:10px;
+        --r-lg:16px;
+        --r-xl:24px;
+        --r-2xl:32px;
+        --sh0:0 1px 3px rgba(0,0,0,.06);
+        --sh1:0 2px 8px rgba(0,0,0,.08),0 1px 3px rgba(0,0,0,.05);
+        --sh2:0 8px 24px rgba(0,0,0,.10),0 2px 8px rgba(0,0,0,.06);
+        --sh3:0 20px 60px rgba(0,0,0,.14),0 4px 16px rgba(0,0,0,.08);
+        --sh-blue:0 8px 32px rgba(37,99,235,.20);
+        --tr:all .2s cubic-bezier(.4,0,.2,1);
+        --glow:0 0 0 3px rgba(59,130,246,.25);
+        --glow-green:0 0 0 3px rgba(16,185,129,.25);
     }
 
-    /* ── base ── */
-    html,body,[class*="css"]{font-family:'Inter','Segoe UI',system-ui,sans-serif;-webkit-font-smoothing:antialiased;}
-    ::-webkit-scrollbar{width:5px;height:5px}
+    /* ── Base ─────────────────────────────────────────────── */
+    html,body,[class*="css"]{
+        font-family:'Inter','Segoe UI',system-ui,sans-serif;
+        -webkit-font-smoothing:antialiased;
+        color:var(--text);
+    }
+    ::-webkit-scrollbar{width:6px;height:6px}
     ::-webkit-scrollbar-track{background:var(--bg);border-radius:10px}
-    ::-webkit-scrollbar-thumb{background:#CBD5E1;border-radius:10px}
-    ::-webkit-scrollbar-thumb:hover{background:#94A3B8}
-    .block-container{padding-top:1.2rem!important}
+    ::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:10px}
+    ::-webkit-scrollbar-thumb:hover{background:var(--muted2)}
+    .block-container{padding-top:1rem!important;padding-bottom:2rem!important;max-width:1400px!important;}
 
-    /* ── hero ── */
+    /* ── HERO ──────────────────────────────────────────────── */
     .hero{
         position:relative;
-        background:linear-gradient(135deg,#0F172A 0%,#1E3A8A 52%,#1D4ED8 100%);
-        border-radius:var(--r-xl);padding:2.4rem 3rem 2rem;margin-bottom:1.4rem;
-        text-align:center;overflow:hidden;
+        background:linear-gradient(135deg,#050D1F 0%,#0F2040 35%,#1E3A8A 65%,#1D4ED8 100%);
+        border-radius:var(--r-2xl);
+        padding:2.8rem 3.5rem 2.4rem;
+        margin-bottom:1.6rem;
+        text-align:center;
+        overflow:hidden;
+        border:1px solid rgba(255,255,255,.06);
+        box-shadow:var(--sh3),var(--sh-blue);
     }
     .hero::before{
         content:'';position:absolute;inset:0;
-        background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),
-                         linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px);
-        background-size:40px 40px;pointer-events:none;
+        background-image:
+            linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),
+            linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);
+        background-size:48px 48px;pointer-events:none;
     }
     .hero::after{
-        content:'';position:absolute;right:-60px;top:-60px;
-        width:260px;height:260px;border-radius:50%;
-        background:radial-gradient(circle,rgba(96,165,250,.20) 0%,transparent 70%);
+        content:'';position:absolute;right:-80px;top:-80px;
+        width:340px;height:340px;border-radius:50%;
+        background:radial-gradient(circle,rgba(96,165,250,.15) 0%,transparent 65%);
         pointer-events:none;
     }
-    .hero-logo{max-width:190px;margin-bottom:.9rem;
-               filter:drop-shadow(0 4px 14px rgba(0,0,0,.35));position:relative;z-index:1;}
-    .hero-title{font-size:2.1rem;font-weight:800;color:#fff;margin:0 0 .35rem;
-                letter-spacing:-.6px;line-height:1.15;position:relative;z-index:1;}
-    .hero-sub{font-size:.92rem;color:rgba(255,255,255,.68);margin:0 0 1.2rem;
-              position:relative;z-index:1;}
-    .hero-chips{display:flex;justify-content:center;gap:.45rem;flex-wrap:wrap;position:relative;z-index:1;}
-    .chip{display:inline-flex;align-items:center;gap:.3rem;
-          background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.22);
-          color:rgba(255,255,255,.92);border-radius:20px;padding:.2rem .72rem;
-          font-size:.75rem;font-weight:600;letter-spacing:.3px;transition:var(--tr);}
-    .chip:hover{background:rgba(255,255,255,.22);}
+    .hero-glow-left{
+        position:absolute;left:-100px;bottom:-80px;
+        width:280px;height:280px;border-radius:50%;
+        background:radial-gradient(circle,rgba(16,185,129,.10) 0%,transparent 65%);
+        pointer-events:none;
+    }
+    .hero-logo{
+        max-width:180px;margin-bottom:1rem;
+        filter:drop-shadow(0 4px 18px rgba(0,0,0,.40));
+        position:relative;z-index:1;
+        transition:var(--tr);
+    }
+    .hero-logo:hover{transform:scale(1.03);}
+    .hero-title{
+        font-size:2.2rem;font-weight:900;color:#fff;
+        margin:0 0 .4rem;letter-spacing:-.8px;
+        line-height:1.12;position:relative;z-index:1;
+        text-shadow:0 2px 12px rgba(0,0,0,.3);
+    }
+    .hero-sub{
+        font-size:.95rem;color:rgba(255,255,255,.65);
+        margin:0 0 1.4rem;position:relative;z-index:1;
+        letter-spacing:.1px;
+    }
+    .hero-chips{
+        display:flex;justify-content:center;
+        gap:.5rem;flex-wrap:wrap;position:relative;z-index:1;
+    }
+    .chip{
+        display:inline-flex;align-items:center;gap:.3rem;
+        background:rgba(255,255,255,.10);
+        border:1px solid rgba(255,255,255,.20);
+        color:rgba(255,255,255,.90);border-radius:20px;
+        padding:.22rem .8rem;font-size:.74rem;
+        font-weight:600;letter-spacing:.3px;
+        transition:var(--tr);backdrop-filter:blur(6px);
+    }
+    .chip:hover{background:rgba(255,255,255,.20);transform:translateY(-1px);}
 
-    /* ── page header ── */
-    .ph{display:flex;align-items:center;gap:.9rem;
-        background:var(--surface);border:1px solid var(--border);
-        border-radius:var(--r);padding:.9rem 1.2rem;margin-bottom:1.1rem;
-        box-shadow:var(--sh0);}
-    .ph-icon{font-size:1.9rem;flex-shrink:0;line-height:1;}
-    .ph-title{font-size:1.25rem;font-weight:800;color:var(--blue);line-height:1.2;}
-    .ph-sub{font-size:.8rem;color:var(--muted);margin-top:.1rem;}
+    /* ── PAGE HEADER ───────────────────────────────────────── */
+    .ph-hdr{
+        display:flex;align-items:center;gap:1rem;
+        background:var(--surface);
+        border:1px solid var(--border);
+        border-left:4px solid var(--blue-l);
+        border-radius:var(--r);padding:.9rem 1.4rem;
+        margin-bottom:1.2rem;box-shadow:var(--sh0);
+        transition:var(--tr);
+    }
+    .ph-hdr:hover{box-shadow:var(--sh1);border-left-color:var(--blue-m);}
+    .ph-icon{font-size:2rem;flex-shrink:0;line-height:1;}
+    .ph-title{font-size:1.3rem;font-weight:800;color:var(--blue);line-height:1.2;}
+    .ph-sub{font-size:.8rem;color:var(--muted);margin-top:.15rem;}
 
-    /* ── section title ── */
-    .stitle{display:flex;align-items:center;font-size:.92rem;font-weight:700;
-            color:var(--blue);padding:.45rem 0 .45rem .75rem;
-            border-left:3px solid var(--blue-l);margin:1rem 0 .6rem;
-            background:linear-gradient(90deg,rgba(59,130,246,.06),transparent);
-            border-radius:0 var(--r) var(--r) 0;}
+    /* ── SECTION TITLE ─────────────────────────────────────── */
+    .stitle{
+        display:flex;align-items:center;
+        font-size:.88rem;font-weight:700;
+        color:var(--blue);
+        padding:.5rem 0 .5rem .85rem;
+        border-left:3px solid var(--blue-l);
+        margin:1.1rem 0 .7rem;
+        background:linear-gradient(90deg,rgba(59,130,246,.07),transparent 80%);
+        border-radius:0 var(--r) var(--r) 0;
+        letter-spacing:.2px;
+    }
 
-    /* ── cards ── */
-    .card{background:var(--surface);border-radius:var(--r);
-          border:1px solid var(--border);box-shadow:var(--sh1);
-          padding:1.2rem 1.4rem;margin-bottom:1rem;transition:var(--tr);}
+    /* ── CARD ──────────────────────────────────────────────── */
+    .card{
+        background:var(--surface);
+        border-radius:var(--r-lg);
+        border:1px solid var(--border);
+        box-shadow:var(--sh1);
+        padding:1.3rem 1.5rem;
+        margin-bottom:1rem;
+        transition:var(--tr);
+    }
     .card:hover{box-shadow:var(--sh2);border-color:var(--blue-b);}
+    .card-accent{border-top:3px solid var(--blue-l);}
 
-    /* ── upload zone ── */
-    .uzone{background:var(--blue-bg);border:2px dashed #93C5FD;
-           border-radius:var(--r);padding:.85rem 1rem;text-align:center;
-           margin-bottom:.5rem;transition:var(--tr);}
-    .uzone:hover{border-color:var(--blue-l);background:#DBEAFE;}
-    .uzone-icon{font-size:1.5rem;line-height:1;}
-    .uzone-title{font-weight:700;color:var(--blue);font-size:.88rem;margin-top:.2rem;}
-    .uzone-sub{font-size:.75rem;color:var(--muted);margin-top:.1rem;}
+    /* ── UPLOAD ZONE ───────────────────────────────────────── */
+    .uzone{
+        background:linear-gradient(135deg,var(--blue-bg),#DBEAFE88);
+        border:2px dashed #93C5FD;
+        border-radius:var(--r-lg);padding:1.1rem 1rem;
+        text-align:center;margin-bottom:.5rem;
+        transition:var(--tr);cursor:pointer;
+    }
+    .uzone:hover{border-color:var(--blue-l);background:linear-gradient(135deg,#DBEAFE,#EFF6FF);}
+    .uzone-icon{font-size:1.7rem;line-height:1;margin-bottom:.3rem;}
+    .uzone-title{font-weight:700;color:var(--blue);font-size:.9rem;margin-top:.2rem;}
+    .uzone-sub{font-size:.75rem;color:var(--muted);margin-top:.15rem;}
 
-    /* ── status boxes ── */
-    .sbox{padding:.65rem 1rem;border-radius:var(--r);
-          font-size:.88rem;font-weight:500;margin:.4rem 0;}
-    .sbox-ok{background:var(--green-bg);color:#065F46;border-left:3px solid var(--green);}
-    .sbox-warn{background:var(--amber-bg);color:#78350F;border-left:3px solid var(--amber);}
+    /* ── STATUS BOXES ──────────────────────────────────────── */
+    .sbox{
+        padding:.7rem 1.1rem;border-radius:var(--r);
+        font-size:.88rem;font-weight:500;margin:.4rem 0;
+        display:flex;align-items:center;gap:.5rem;
+    }
+    .sbox-ok{
+        background:var(--green-bg);color:#065F46;
+        border:1px solid #A7F3D0;border-left:3px solid var(--green);
+    }
+    .sbox-warn{
+        background:var(--amber-bg);color:#78350F;
+        border:1px solid #FDE68A;border-left:3px solid var(--amber);
+    }
+    .sbox-err{
+        background:var(--red-bg);color:#991B1B;
+        border:1px solid #FECACA;border-left:3px solid var(--red);
+    }
 
-    /* ── layout badge ── */
-    .lbadge{display:inline-flex;align-items:center;gap:.35rem;
-            background:var(--blue-m);color:#fff;border-radius:var(--r);
-            padding:.3rem .8rem;font-size:.8rem;font-weight:700;margin-top:.45rem;}
+    /* ── LABEL BADGE ───────────────────────────────────────── */
+    .lbadge{
+        display:inline-flex;align-items:center;gap:.35rem;
+        background:var(--blue-m);color:#fff;
+        border-radius:var(--r);padding:.3rem .85rem;
+        font-size:.78rem;font-weight:700;
+        margin-top:.5rem;box-shadow:var(--sh-blue);
+        letter-spacing:.2px;
+    }
     .lbadge.amber{background:var(--amber);}
+    .lbadge.green{background:var(--green-l);}
 
-    /* ── empty state ── */
-    .empty{text-align:center;padding:2.8rem 1rem;color:var(--muted);}
-    .empty-icon{font-size:2.8rem;margin-bottom:.5rem;opacity:.55;}
-    .empty-title{font-size:1rem;font-weight:700;color:#94A3B8;margin-bottom:.25rem;}
+    /* ── PILL ──────────────────────────────────────────────── */
+    .ipill{
+        display:inline-flex;align-items:center;gap:.35rem;
+        background:var(--blue-bg);border:1px solid var(--blue-b);
+        color:var(--blue);border-radius:20px;
+        padding:.22rem .8rem;font-size:.78rem;font-weight:600;
+        margin-bottom:.5rem;
+    }
+
+    /* ── FIELD LABEL ───────────────────────────────────────── */
+    .flabel{
+        font-size:.76rem;font-weight:600;color:var(--muted);
+        text-transform:uppercase;letter-spacing:.6px;margin-bottom:.3rem;
+    }
+
+    /* ── EMPTY STATE ───────────────────────────────────────── */
+    .empty{
+        text-align:center;padding:3.5rem 1.5rem;
+        color:var(--muted);border:2px dashed var(--border);
+        border-radius:var(--r-xl);background:var(--surface2);
+    }
+    .empty-icon{font-size:3rem;margin-bottom:.6rem;opacity:.5;}
+    .empty-title{font-size:1rem;font-weight:700;color:var(--muted2);margin-bottom:.3rem;}
     .empty-sub{font-size:.82rem;color:#CBD5E1;}
 
-    /* ── info pill ── */
-    .ipill{display:inline-flex;align-items:center;gap:.35rem;
-           background:var(--blue-bg);border:1px solid var(--blue-b);
-           color:var(--blue);border-radius:20px;padding:.22rem .8rem;
-           font-size:.78rem;font-weight:600;margin-bottom:.5rem;}
-
-    /* ── field label ── */
-    .flabel{font-size:.78rem;font-weight:600;color:var(--muted);
-            text-transform:uppercase;letter-spacing:.5px;margin-bottom:.2rem;}
-
-    /* ── tabs ── */
+    /* ── TABS ──────────────────────────────────────────────── */
     .stTabs [data-baseweb="tab-list"]{
-        gap:3px;background:var(--bg);border-radius:var(--r);
-        padding:4px;border:1px solid var(--border);}
+        gap:3px;background:var(--bg);
+        border-radius:var(--r-lg);
+        padding:5px;border:1px solid var(--border);
+    }
     .stTabs [data-baseweb="tab"]{
-        border-radius:6px;font-weight:600;font-size:.86rem;
-        padding:.4rem .95rem;transition:var(--tr);color:var(--muted);}
-    .stTabs [data-baseweb="tab"]:hover{color:var(--blue-m);background:rgba(59,130,246,.08);}
+        border-radius:8px;font-weight:600;font-size:.85rem;
+        padding:.42rem 1rem;transition:var(--tr);color:var(--muted);
+        border:none;
+    }
+    .stTabs [data-baseweb="tab"]:hover{
+        color:var(--blue-m);background:rgba(59,130,246,.08);
+    }
     .stTabs [aria-selected="true"]{
-        background:var(--surface)!important;color:var(--blue)!important;
-        box-shadow:var(--sh1)!important;}
+        background:var(--surface)!important;
+        color:var(--blue)!important;
+        box-shadow:var(--sh1)!important;
+    }
 
-    /* ── buttons ── */
-    .stButton>button{width:100%;border-radius:var(--r);font-weight:600;
-                     font-size:.86rem;letter-spacing:.1px;transition:var(--tr);}
-    .stButton>button:hover{transform:translateY(-1px);box-shadow:var(--sh2);}
-    .stButton>button:active{transform:translateY(0);box-shadow:var(--sh0);}
+    /* ── BUTTONS ───────────────────────────────────────────── */
+    .stButton>button{
+        border-radius:var(--r)!important;font-weight:600!important;
+        font-size:.86rem!important;letter-spacing:.1px;
+        transition:var(--tr)!important;
+    }
+    .stButton>button:hover{
+        transform:translateY(-1px)!important;
+        box-shadow:var(--sh2)!important;
+    }
+    .stButton>button:active{
+        transform:translateY(0)!important;
+        box-shadow:var(--sh0)!important;
+    }
+    .stButton>button[kind="primary"]{
+        background:linear-gradient(135deg,var(--blue-m),var(--blue))!important;
+        box-shadow:var(--sh-blue)!important;border:none!important;
+    }
+    .stButton>button[kind="primary"]:hover{
+        background:linear-gradient(135deg,#1D4ED8,var(--blue))!important;
+    }
 
-    /* ── radio ── */
-    div[data-testid="stRadio"]>div{gap:.45rem;}
+    /* ── RADIO ─────────────────────────────────────────────── */
+    div[data-testid="stRadio"]>div{gap:.5rem;}
     div[data-testid="stRadio"] label{
-        background:var(--surface);border:1.5px solid var(--border);
-        border-radius:var(--r);padding:.5rem .9rem;cursor:pointer;
-        transition:var(--tr);font-weight:500;font-size:.86rem;}
-    div[data-testid="stRadio"] label:hover{border-color:var(--blue-l);background:var(--blue-bg);}
+        background:var(--surface);
+        border:1.5px solid var(--border);
+        border-radius:var(--r);padding:.55rem 1rem;
+        cursor:pointer;transition:var(--tr);
+        font-weight:500;font-size:.86rem;
+    }
+    div[data-testid="stRadio"] label:hover{
+        border-color:var(--blue-l);
+        background:var(--blue-bg);
+    }
 
-    /* ── expander ── */
-    .streamlit-expanderHeader{font-weight:600;font-size:.88rem;color:var(--blue);
-                               background:var(--bg);border-radius:6px;padding:.45rem .75rem!important;}
+    /* ── EXPANDER ──────────────────────────────────────────── */
+    .streamlit-expanderHeader{
+        font-weight:600;font-size:.88rem;color:var(--blue);
+        background:var(--surface2);border-radius:8px;
+        padding:.48rem .8rem!important;
+    }
+    [data-testid="stExpander"]{
+        border:1px solid var(--border)!important;
+        border-radius:var(--r)!important;
+    }
 
-    /* ── metrics ── */
+    /* ── METRICS ───────────────────────────────────────────── */
     [data-testid="metric-container"]{
-        background:var(--surface);border:1px solid var(--border);
-        border-radius:var(--r);padding:.7rem .9rem;box-shadow:var(--sh0);transition:var(--tr);}
-    [data-testid="metric-container"]:hover{box-shadow:var(--sh1);border-color:var(--blue-b);}
-    [data-testid="stMetricValue"]{font-size:1.2rem!important;font-weight:700!important;color:var(--blue)!important;}
-    [data-testid="stMetricLabel"]{font-size:.74rem!important;font-weight:600!important;
-                                  color:var(--muted)!important;text-transform:uppercase;letter-spacing:.45px;}
+        background:var(--surface);
+        border:1px solid var(--border);
+        border-radius:var(--r-lg);
+        padding:.8rem 1rem;
+        box-shadow:var(--sh0);
+        transition:var(--tr);
+        position:relative;overflow:hidden;
+    }
+    [data-testid="metric-container"]::after{
+        content:'';position:absolute;top:0;left:0;right:0;height:3px;
+        background:linear-gradient(90deg,var(--blue-l),var(--blue-m));
+        border-radius:var(--r) var(--r) 0 0;
+    }
+    [data-testid="metric-container"]:hover{
+        box-shadow:var(--sh1);border-color:var(--blue-b);
+    }
+    [data-testid="stMetricValue"]{
+        font-size:1.25rem!important;font-weight:700!important;
+        color:var(--blue)!important;font-family:'Inter',sans-serif!important;
+    }
+    [data-testid="stMetricLabel"]{
+        font-size:.72rem!important;font-weight:600!important;
+        color:var(--muted)!important;text-transform:uppercase;
+        letter-spacing:.5px;
+    }
 
-    /* ── inputs ── */
+    /* ── INPUTS ────────────────────────────────────────────── */
     .stTextInput input,.stNumberInput input{
-        border-radius:var(--r)!important;border:1.5px solid var(--border)!important;
-        font-size:.86rem!important;transition:var(--tr);}
+        border-radius:var(--r)!important;
+        border:1.5px solid var(--border)!important;
+        font-size:.86rem!important;transition:var(--tr);
+        background:var(--surface)!important;
+    }
     .stTextInput input:focus,.stNumberInput input:focus{
-        border-color:var(--blue-l)!important;box-shadow:var(--glow)!important;}
+        border-color:var(--blue-l)!important;
+        box-shadow:var(--glow)!important;
+    }
+    .stPasswordInput input{
+        border-radius:var(--r)!important;
+        border:1.5px solid var(--border)!important;
+        font-size:.86rem!important;transition:var(--tr);
+    }
+    .stPasswordInput input:focus{
+        border-color:var(--blue-l)!important;
+        box-shadow:var(--glow)!important;
+    }
 
-    /* ── dataframe / editor ── */
+    /* ── DATA TABLES ───────────────────────────────────────── */
     [data-testid="stDataFrame"],[data-testid="stDataEditor"]{
-        border-radius:var(--r);border:1px solid var(--border)!important;overflow:hidden;}
+        border-radius:var(--r-lg)!important;
+        border:1px solid var(--border)!important;
+        overflow:hidden;
+        box-shadow:var(--sh1)!important;
+    }
 
-    /* ── divider ── */
-    hr{border:none;border-top:1px solid var(--border);margin:.9rem 0;}
+    /* ── DIVIDER ───────────────────────────────────────────── */
+    hr{border:none;border-top:1px solid var(--border);margin:1rem 0;}
 
-    /* ── animations ── */
+    /* ── MASTERSAF COMPONENTS ──────────────────────────────── */
+    .ms-log-area{
+        background:#080D18;
+        border:1px solid rgba(59,130,246,.15);
+        border-radius:var(--r-lg);
+        padding:1.1rem 1.2rem;
+        font-family:'JetBrains Mono',monospace;
+        font-size:.75rem;color:#CBD5E1;
+        max-height:420px;overflow-y:auto;
+        white-space:pre-wrap;line-height:1.6;
+        box-shadow:inset 0 2px 8px rgba(0,0,0,.3);
+    }
+    .ms-log-area .log-ts{color:#334155;}
+    .ms-log-area .log-ok{color:#22D3EE;}
+    .ms-log-area .log-warn{color:#F59E0B;}
+    .ms-log-area .log-err{color:#F87171;}
+    .ms-log-area .log-info{color:#60A5FA;}
+
+    .ms-stat-grid{
+        display:grid;
+        grid-template-columns:repeat(4,1fr);
+        gap:1rem;margin:1rem 0;
+    }
+    .ms-stat-card{
+        background:var(--surface);
+        border:1px solid var(--border);
+        border-radius:var(--r-lg);
+        padding:1.2rem 1.4rem;
+        position:relative;overflow:hidden;
+        transition:var(--tr);
+        box-shadow:var(--sh0);
+    }
+    .ms-stat-card::before{
+        content:'';position:absolute;
+        top:0;left:0;right:0;height:3px;
+        background:linear-gradient(90deg,var(--blue-l),var(--green-l));
+    }
+    .ms-stat-card:hover{
+        box-shadow:var(--sh2);
+        transform:translateY(-2px);
+    }
+    .ms-stat-label{
+        font-size:.68rem;font-weight:700;color:var(--muted);
+        text-transform:uppercase;letter-spacing:.12em;margin-bottom:.55rem;
+    }
+    .ms-stat-value{
+        font-family:'JetBrains Mono',monospace;
+        font-size:1.6rem;font-weight:600;
+        color:var(--green-l);line-height:1;
+    }
+    .ms-stat-sub{font-size:.72rem;color:var(--muted2);margin-top:.35rem;}
+
+    /* ── PROGRESS / ANIMATIONS ─────────────────────────────── */
     @keyframes spin{to{transform:rotate(360deg)}}
     .spinner{animation:spin 1.2s linear infinite;display:inline-block;}
-    @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-    .fade-up{animation:fadeUp .28s ease forwards;}
 
-    /* ── responsive ── */
-    @media(max-width:900px){
-        .hero{padding:1.8rem 1.4rem 1.5rem;}
-        .hero-title{font-size:1.55rem;}
-        .hero-logo{max-width:140px;}
+    @keyframes fadeUp{
+        from{opacity:0;transform:translateY(10px)}
+        to{opacity:1;transform:translateY(0)}
     }
-    @media(max-width:600px){
-        .hero-title{font-size:1.3rem;}
-        .hero{padding:1.3rem 1rem 1.1rem;border-radius:var(--r-lg);}
-        .stTabs [data-baseweb="tab"]{padding:.32rem .55rem;font-size:.78rem;}
+    .fade-up{animation:fadeUp .3s ease forwards;}
+
+    @keyframes pulse-glow{
+        0%,100%{box-shadow:0 0 0 0 rgba(59,130,246,.4)}
+        50%{box-shadow:0 0 0 8px rgba(59,130,246,.0)}
+    }
+    .pulse{animation:pulse-glow 2s ease-in-out infinite;}
+
+    @keyframes shimmer{
+        0%{background-position:-200% 0}
+        100%{background-position:200% 0}
+    }
+    .skeleton{
+        background:linear-gradient(90deg,var(--border) 25%,var(--surface2) 50%,var(--border) 75%);
+        background-size:200% 100%;animation:shimmer 1.4s ease infinite;
+        border-radius:var(--r);height:1rem;
+    }
+
+    /* ── RESPONSIVE ────────────────────────────────────────── */
+    @media(max-width:1024px){
+        .ms-stat-grid{grid-template-columns:repeat(2,1fr);}
+        .hero{padding:2rem 2rem 1.8rem;}
+        .hero-title{font-size:1.8rem;}
+    }
+    @media(max-width:768px){
+        .hero{padding:1.6rem 1.2rem 1.4rem;border-radius:var(--r-xl);}
+        .hero-title{font-size:1.45rem;letter-spacing:-.4px;}
+        .hero-logo{max-width:140px;}
+        .hero-sub{font-size:.85rem;}
+        .ms-stat-grid{grid-template-columns:1fr 1fr;}
+        .stTabs [data-baseweb="tab"]{padding:.35rem .6rem;font-size:.78rem;}
         .chip{font-size:.68rem;padding:.15rem .55rem;}
+        .ph-title{font-size:1.1rem;}
+        .block-container{padding-left:.75rem!important;padding-right:.75rem!important;}
+    }
+    @media(max-width:480px){
+        .hero-title{font-size:1.2rem;}
+        .hero{padding:1.2rem .9rem 1rem;border-radius:var(--r-lg);}
+        .ms-stat-grid{grid-template-columns:1fr;}
+        .hero-sub{display:none;}
     }
     </style>""")
 
-
-# ==============================================================================
-# PARTE 1 — PROCESSADOR TXT
-# ==============================================================================
-def processador_txt():
-    page_header("📄", "Processador de Arquivos TXT",
-                "Remova linhas indesejadas e substitua padrões em arquivos TXT")
-
-    # ── lógica interna (inalterada) ──────────────────────────────────────
-    def detectar_encoding(conteudo):
-        return chardet.detect(conteudo)['encoding']
-
-    def processar_arquivo(conteudo, padroes):
-        try:
-            substituicoes = {
-                "IMPOSTO IMPORTACAO": "IMP IMPORT",
-                "TAXA SICOMEX": "TX SISCOMEX",
-                "FRETE INTERNACIONAL": "FRET INTER",
-                "SEGURO INTERNACIONAL": "SEG INTERN",
-            }
-            encoding = detectar_encoding(conteudo)
-            try:
-                texto = conteudo.decode(encoding)
-            except UnicodeDecodeError:
-                texto = conteudo.decode('latin-1')
-            linhas = texto.splitlines()
-            out = []
-            for linha in linhas:
-                linha = linha.strip()
-                if not any(p in linha for p in padroes):
-                    for orig, sub in substituicoes.items():
-                        linha = linha.replace(orig, sub)
-                    out.append(linha)
-            return "\n".join(out), len(linhas)
-        except Exception as e:
-            st.error(f"Erro ao processar: {str(e)}")
-            return None, 0
-
-    padroes_default = ["-------", "SPED EFD-ICMS/IPI"]
-
-    # ── layout ───────────────────────────────────────────────────────────
-    col_up, col_cfg = st.columns([3, 2], gap="large")
-
-    with col_up:
-        ph('<p class="flabel">📁 Selecione o arquivo TXT</p>')
-        arquivo = st.file_uploader("Selecione o arquivo TXT", type=['txt'])
-
-    with col_cfg:
-        with st.expander("⚙️ Padrões adicionais de remoção"):
-            padroes_add = st.text_input("Padrões (vírgula)", placeholder="Ex: TOTAL, SOMA")
-            padroes = padroes_default + [
-                p.strip() for p in padroes_add.split(",") if p.strip()
-            ] if padroes_add else padroes_default
-        ph(f'<div class="ipill">🔍 {len(padroes)} padrões ativos</div>')
-
-    if arquivo is not None:
-        st.markdown("")
-        if st.button("🔄 Processar Arquivo TXT", type="primary", use_container_width=True):
-            try:
-                show_loading_animation("Analisando arquivo...")
-                conteudo = arquivo.read()
-                show_processing_animation("Processando linhas...")
-                resultado, total = processar_arquivo(conteudo, padroes)
-                if resultado is not None:
-                    show_success_animation("Processamento concluído!")
-                    mantidas  = len(resultado.splitlines())
-                    removidas = total - mantidas
-                    k1, k2, k3 = st.columns(3)
-                    k1.metric("📋 Originais",  total)
-                    k2.metric("✅ Mantidas",   mantidas)
-                    k3.metric("🗑️ Removidas",  removidas,
-                              delta=f"-{removidas}", delta_color="inverse")
-                    section_title("👁️ Prévia")
-                    st.text_area("Conteúdo processado", resultado, height=260)
-                    buf = BytesIO()
-                    buf.write(resultado.encode('utf-8'))
-                    buf.seek(0)
-                    st.download_button("⬇️ Baixar arquivo processado", data=buf,
-                                       file_name=f"processado_{arquivo.name}",
-                                       mime="text/plain", use_container_width=True)
-            except Exception as e:
-                st.error(f"Erro: {str(e)}")
-    else:
-        empty_state("📂", "Nenhum arquivo carregado",
-                    "Selecione um arquivo .TXT acima para começar")
-
-
-# ==============================================================================
-# PARTE 2 — CLASSE CTeProcessorDirect (lógica 100% original)
-# ==============================================================================
-class CTeProcessorDirect:
-    def __init__(self):
-        self.processed_data = []
-
-    def extract_nfe_number_from_key(self, chave_acesso):
-        if not chave_acesso or len(chave_acesso) != 44:
-            return None
-        try:
-            return chave_acesso[25:34]
-        except Exception:
-            return None
-
-    def extract_peso_bruto(self, root):
-        try:
-            tipos_peso = ['PESO BRUTO', 'PESO BASE DE CALCULO', 'PESO BASE CÁLCULO', 'PESO']
-            for prefix, uri in CTE_NAMESPACES.items():
-                for infQ in root.findall(f'.//{{{uri}}}infQ'):
-                    tpMed  = infQ.find(f'{{{uri}}}tpMed')
-                    qCarga = infQ.find(f'{{{uri}}}qCarga')
-                    if tpMed is not None and tpMed.text and qCarga is not None and qCarga.text:
-                        for tp in tipos_peso:
-                            if tp in tpMed.text.upper():
-                                return float(qCarga.text), tp
-            for infQ in root.findall('.//infQ'):
-                tpMed  = infQ.find('tpMed')
-                qCarga = infQ.find('qCarga')
-                if tpMed is not None and tpMed.text and qCarga is not None and qCarga.text:
-                    for tp in tipos_peso:
-                        if tp in tpMed.text.upper():
-                            return float(qCarga.text), tp
-            return 0.0, "Não encontrado"
-        except Exception as e:
-            st.warning(f"Não foi possível extrair o peso: {str(e)}")
-            return 0.0, "Erro na extração"
-
-    def extract_cte_data(self, xml_content, filename):
-        try:
-            root = ET.fromstring(xml_content)
-            for prefix, uri in CTE_NAMESPACES.items():
-                ET.register_namespace(prefix, uri)
-
-            def find_text(element, xpath):
-                try:
-                    for prefix, uri in CTE_NAMESPACES.items():
-                        found = element.find(xpath.replace('cte:', f'{{{uri}}}'))
-                        if found is not None and found.text:
-                            return found.text
-                    found = element.find(xpath.replace('cte:', ''))
-                    if found is not None and found.text:
-                        return found.text
-                    return None
-                except Exception:
-                    return None
-
-            nCT        = find_text(root, './/cte:nCT')
-            dhEmi      = find_text(root, './/cte:dhEmi')
-            cMunIni    = find_text(root, './/cte:cMunIni')
-            UFIni      = find_text(root, './/cte:UFIni')
-            cMunFim    = find_text(root, './/cte:cMunFim')
-            UFFim      = find_text(root, './/cte:UFFim')
-            emit_xNome = find_text(root, './/cte:emit/cte:xNome')
-            vTPrest    = find_text(root, './/cte:vTPrest')
-            rem_xNome  = find_text(root, './/cte:rem/cte:xNome')
-            dest_xNome = find_text(root, './/cte:dest/cte:xNome')
-            dest_CNPJ  = find_text(root, './/cte:dest/cte:CNPJ')
-            dest_CPF   = find_text(root, './/cte:dest/cte:CPF')
-            documento_destinatario = dest_CNPJ or dest_CPF or 'N/A'
-            dest_xLgr   = find_text(root, './/cte:dest/cte:enderDest/cte:xLgr')
-            dest_nro    = find_text(root, './/cte:dest/cte:enderDest/cte:nro')
-            dest_xBairro= find_text(root, './/cte:dest/cte:enderDest/cte:xBairro')
-            dest_xMun   = find_text(root, './/cte:dest/cte:enderDest/cte:xMun')
-            dest_CEP    = find_text(root, './/cte:dest/cte:enderDest/cte:CEP')
-            dest_UF     = find_text(root, './/cte:dest/cte:enderDest/cte:UF')
-            endereco = ""
-            if dest_xLgr:
-                endereco += dest_xLgr
-                if dest_nro:    endereco += f", {dest_nro}"
-                if dest_xBairro:endereco += f" - {dest_xBairro}"
-                if dest_xMun:   endereco += f", {dest_xMun}"
-                if dest_UF:     endereco += f"/{dest_UF}"
-                if dest_CEP:    endereco += f" - CEP: {dest_CEP}"
-            if not endereco: endereco = "N/A"
-            infNFe_chave = find_text(root, './/cte:infNFe/cte:chave')
-            numero_nfe   = self.extract_nfe_number_from_key(infNFe_chave) if infNFe_chave else None
-            peso_bruto, tipo_peso = self.extract_peso_bruto(root)
-            data_fmt = None
-            if dhEmi:
-                for fmt in ('%Y-%m-%d', '%d/%m/%Y', '%d/%m/%y'):
-                    try:
-                        data_fmt = datetime.strptime(dhEmi[:10], fmt).strftime('%d/%m/%y')
-                        break
-                    except Exception:
-                        pass
-                if not data_fmt: data_fmt = dhEmi[:10]
-            try:    vTPrest = float(vTPrest) if vTPrest else 0.0
-            except: vTPrest = 0.0
-            return {
-                'Arquivo': filename, 'nCT': nCT or 'N/A',
-                'Data Emissão': data_fmt or dhEmi or 'N/A',
-                'Código Município Início': cMunIni or 'N/A',
-                'UF Início': UFIni or 'N/A',
-                'Código Município Fim': cMunFim or 'N/A',
-                'UF Fim': UFFim or 'N/A',
-                'Emitente': emit_xNome or 'N/A',
-                'Valor Prestação': vTPrest,
-                'Peso Bruto (kg)': peso_bruto,
-                'Tipo de Peso Encontrado': tipo_peso,
-                'Remetente': rem_xNome or 'N/A',
-                'Destinatário': dest_xNome or 'N/A',
-                'Documento Destinatário': documento_destinatario,
-                'Endereço Destinatário': endereco,
-                'Município Destino': dest_xMun or 'N/A',
-                'UF Destino': dest_UF or 'N/A',
-                'Chave NFe': infNFe_chave or 'N/A',
-                'Número NFe': numero_nfe or 'N/A',
-                'Data Processamento': datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
-            }
-        except Exception as e:
-            st.error(f"Erro ao extrair CT-e {filename}: {str(e)}")
-            return None
-
-    def process_single_file(self, uploaded_file):
-        try:
-            file_content = uploaded_file.getvalue()
-            filename     = uploaded_file.name
-            if not filename.lower().endswith('.xml'):
-                return False, "Arquivo não é XML"
-            content_str = file_content.decode('utf-8', errors='ignore')
-            if 'CTe' not in content_str and 'conhecimento' not in content_str.lower():
-                return False, "Arquivo não parece ser um CT-e"
-            data = self.extract_cte_data(content_str, filename)
-            if data:
-                self.processed_data.append(data)
-                return True, f"CT-e {filename} processado."
-            return False, f"Erro ao processar {filename}"
-        except Exception as e:
-            return False, f"Erro: {str(e)}"
-
-    def process_multiple_files(self, uploaded_files):
-        results = {'success': 0, 'errors': 0, 'messages': []}
-        pb = st.progress(0)
-        st_txt = st.empty()
-        for i, f in enumerate(uploaded_files):
-            st_txt.text(f"Processando {i+1}/{len(uploaded_files)}: {f.name}")
-            pb.progress((i + 1) / len(uploaded_files))
-            ok, msg = self.process_single_file(f)
-            if ok: results['success'] += 1
-            else:  results['errors']  += 1
-            results['messages'].append(msg)
-        pb.empty(); st_txt.empty()
-        return results
-
-    def get_dataframe(self):
-        return pd.DataFrame(self.processed_data) if self.processed_data else pd.DataFrame()
-
-    def clear_data(self):
-        self.processed_data = []
-
-
-# ==============================================================================
-# PARTE 2 — UI PROCESSADOR CT-E
-# ==============================================================================
-def processador_cte():
-    processor = CTeProcessorDirect()
-    page_header("🚚", "Processador de CT-e",
-                "Extrai dados de XML CT-e e gera planilha para Power BI")
-
-    tab_up, tab_dados, tab_exp = st.tabs(
-        ["📤  Upload", "📊  Dados & Análise", "📥  Exportar"])
-
-    # ── TAB UPLOAD ────────────────────────────────────────────────────────
-    with tab_up:
-        section_title("Modo de Upload")
-        modo = st.radio("Modo de upload", ["☝️ Individual", "📦 Em Lote"],
-                        horizontal=True)
-
-        if modo == "☝️ Individual":
-            col_u, col_i = st.columns([3, 2], gap="large")
-            with col_u:
-                ph('<p class="flabel">Arquivo XML CT-e</p>')
-                uploaded_file = st.file_uploader("Arquivo XML CT-e", type=['xml'],
-                                                 key="single_cte")
-            with col_i:
-                ph('<div class="ipill">🔍 Busca inteligente de peso</div>')
-                with st.expander("ℹ️ Campos reconhecidos"):
-                    st.markdown("1. **PESO BRUTO** — principal\n"
-                                "2. **PESO BASE DE CALCULO** — alt. 1\n"
-                                "3. **PESO BASE CÁLCULO** — alt. 2\n"
-                                "4. **PESO** — genérico")
-            if uploaded_file:
-                if st.button("📊 Processar CT-e", key="process_single",
-                             type="primary", use_container_width=True):
-                    show_loading_animation("Analisando XML...")
-                    show_processing_animation("Extraindo dados...")
-                    ok, msg = processor.process_single_file(uploaded_file)
-                    if ok:
-                        show_success_animation("CT-e processado!")
-                        df = processor.get_dataframe()
-                        if not df.empty:
-                            u = df.iloc[-1]
-                            r1, r2 = st.columns(2)
-                            r1.metric("⚖️ Peso", f"{u['Peso Bruto (kg)']} kg")
-                            r2.metric("🏷️ Tipo", u['Tipo de Peso Encontrado'])
-                    else:
-                        st.error(msg)
-        else:
-            ph('<p class="flabel">Múltiplos arquivos XML CT-e</p>')
-            uploaded_files = st.file_uploader("Arquivos XML CT-e", type=['xml'],
-                                              accept_multiple_files=True,
-                                              key="multiple_cte")
-            if uploaded_files:
-                ph(f'<div class="ipill">📎 {len(uploaded_files)} arquivo(s) selecionado(s)</div>')
-                if st.button("📊 Processar Todos", key="process_multiple",
-                             type="primary", use_container_width=True):
-                    show_loading_animation(f"Processando {len(uploaded_files)} arquivos...")
-                    results = processor.process_multiple_files(uploaded_files)
-                    show_success_animation("Lote concluído!")
-                    r1, r2 = st.columns(2)
-                    r1.metric("✅ Sucesso", results['success'])
-                    r2.metric("❌ Erros",   results['errors'])
-                    df = processor.get_dataframe()
-                    if not df.empty:
-                        k1, k2, k3 = st.columns(3)
-                        k1.metric("⚖️ Peso Total", f"{df['Peso Bruto (kg)'].sum():,.2f} kg")
-                        k2.metric("📈 Peso Médio",  f"{df['Peso Bruto (kg)'].mean():,.2f} kg")
-                        k3.metric("🏷️ Tipos",        df['Tipo de Peso Encontrado'].nunique())
-                    if results['errors'] > 0:
-                        with st.expander("⚠️ Erros detalhados"):
-                            for msg in results['messages']:
-                                if "Erro" in msg: st.warning(msg)
-
-        st.divider()
-        if st.button("🗑️ Limpar Dados", type="secondary", use_container_width=True):
-            processor.clear_data()
-            st.success("Dados limpos.")
-            time.sleep(0.8)
-            st.rerun()
-
-    # ── TAB DADOS ────────────────────────────────────────────────────────
-    with tab_dados:
-        df = processor.get_dataframe()
-        if not df.empty:
-            section_title("🔎 Filtros")
-            fc1, fc2, fc3 = st.columns(3)
-            with fc1:
-                uf_f = st.multiselect("UF Início",    options=df['UF Início'].unique())
-            with fc2:
-                uf_d = st.multiselect("UF Destino",   options=df['UF Destino'].unique())
-            with fc3:
-                tp_f = st.multiselect("Tipo de Peso", options=df['Tipo de Peso Encontrado'].unique())
-
-            pmin = float(df['Peso Bruto (kg)'].min())
-            pmax = float(df['Peso Bruto (kg)'].max())
-            pf   = st.slider("Faixa de Peso (kg)", pmin, pmax, (pmin, pmax),
-                             format="%.1f kg") if pmin < pmax else (pmin, pmax)
-
-            fdf = df.copy()
-            if uf_f: fdf = fdf[fdf['UF Início'].isin(uf_f)]
-            if uf_d: fdf = fdf[fdf['UF Destino'].isin(uf_d)]
-            if tp_f: fdf = fdf[fdf['Tipo de Peso Encontrado'].isin(tp_f)]
-            fdf = fdf[(fdf['Peso Bruto (kg)'] >= pf[0]) & (fdf['Peso Bruto (kg)'] <= pf[1])]
-
-            section_title("📊 Métricas")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("💰 Valor Total",    f"R$ {fdf['Valor Prestação'].sum():,.2f}")
-            m2.metric("⚖️ Peso Total",     f"{fdf['Peso Bruto (kg)'].sum():,.2f} kg")
-            m3.metric("📈 Peso Médio",     f"{fdf['Peso Bruto (kg)'].mean():,.2f} kg")
-            m4.metric("📋 CT-es",          len(fdf))
-
-            section_title("📋 Dados")
-            cols = ['Arquivo','nCT','Data Emissão','Emitente','Remetente',
-                    'Destinatário','UF Início','UF Destino','Peso Bruto (kg)',
-                    'Tipo de Peso Encontrado','Valor Prestação']
-            st.dataframe(fdf[cols], use_container_width=True, height=300)
-            with st.expander("📋 Todos os campos"):
-                st.dataframe(fdf, use_container_width=True)
-
-            section_title("📈 Análise Visual")
-            g1, g2 = st.columns(2)
-            with g1:
-                if not fdf.empty:
-                    tc = fdf['Tipo de Peso Encontrado'].value_counts()
-                    fig = px.pie(values=tc.values, names=tc.index,
-                                 title="Distribuição por Tipo de Peso",
-                                 color_discrete_sequence=px.colors.sequential.Blues_r,
-                                 hole=0.42)
-                    fig.update_layout(margin=dict(t=38,b=8,l=8,r=8),
-                                      legend=dict(orientation="h", y=-0.18))
-                    st.plotly_chart(fig, use_container_width=True)
-            with g2:
-                if not fdf.empty:
-                    fig2 = px.scatter(fdf, x='Peso Bruto (kg)', y='Valor Prestação',
-                                      color='Tipo de Peso Encontrado',
-                                      title="Peso vs Valor Prestação",
-                                      color_discrete_sequence=px.colors.qualitative.Set2)
-                    try:
-                        x = fdf['Peso Bruto (kg)'].values
-                        y = fdf['Valor Prestação'].values
-                        mask = ~np.isnan(x) & ~np.isnan(y)
-                        xc, yc = x[mask], y[mask]
-                        if len(xc) > 1:
-                            xs = np.linspace(xc.min(), xc.max(), 100)
-                            fig2.add_trace(go.Scatter(
-                                x=xs, y=np.poly1d(np.polyfit(xc, yc, 1))(xs),
-                                mode='lines', name='Tendência',
-                                line=dict(color='#EF4444', dash='dash'), opacity=.7))
-                    except Exception:
-                        pass
-                    fig2.update_layout(margin=dict(t=38,b=8,l=8,r=8),
-                                       legend=dict(orientation="h", y=-0.22))
-                    st.plotly_chart(fig2, use_container_width=True)
-        else:
-            empty_state("🚚", "Nenhum CT-e processado",
-                        "Vá para Upload e carregue arquivos XML")
-
-    # ── TAB EXPORTAR ──────────────────────────────────────────────────────
-    with tab_exp:
-        df = processor.get_dataframe()
-        if not df.empty:
-            section_title("💾 Exportar Dados")
-            cf, cc = st.columns([1, 2], gap="large")
-            with cf:
-                st.metric("📋 Registros", len(df))
-                fmt = st.radio("Formato", ["📊 Excel (.xlsx)", "📄 CSV (.csv)"])
-            with cc:
-                cols = st.multiselect("Colunas", options=df.columns.tolist(),
-                                      default=df.columns.tolist())
-            df_exp = df[cols] if cols else df
-            st.divider()
-            if "Excel" in fmt:
-                out = BytesIO()
-                with pd.ExcelWriter(out, engine='xlsxwriter') as w:
-                    df_exp.to_excel(w, sheet_name='Dados_CTe', index=False)
-                out.seek(0)
-                st.download_button("📥 Baixar Excel", data=out,
-                                   file_name="dados_cte.xlsx",
-                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                                   use_container_width=True)
-            else:
-                csv = df_exp.to_csv(index=False).encode('utf-8')
-                st.download_button("📥 Baixar CSV", data=csv,
-                                   file_name="dados_cte.csv", mime="text/csv",
-                                   use_container_width=True)
-            with st.expander("👁️ Prévia"):
-                st.dataframe(df_exp.head(10), use_container_width=True)
-        else:
-            empty_state("📥", "Nenhum dado disponível",
-                        "Processe CT-es na aba Upload primeiro")
-
-
-# ==============================================================================
-# PARTE 3A — PARSER EXTRATO DUIMP (layout antigo / HafelePDFParser)
+# PARTE 3 — PARSER EXTRATO DUIMP (HafelePDFParser)
 # ==============================================================================
 class HafelePDFParser:
     """
     Parser para o layout Extrato DUIMP (APP2 original).
-    Processa em lotes de _PDF_CHUNK_PAGES páginas para suportar PDFs
-    gigantes (1000+ páginas) sem travar por falta de memória.
-    O buffer de overlap garante que itens que cruzam a fronteira
-    entre lotes não sejam perdidos.
+    Processa em lotes de _PDF_CHUNK_PAGES páginas.
+    Buffer residual limitado a _MAX_BUF_CHARS para evitar OOM.
     """
+    _MAX_BUF_CHARS = 500_000  # ~500KB de texto — suficiente para qualquer item
 
     def __init__(self):
         self.documento = {'cabecalho': {}, 'itens': [], 'totais': {}}
@@ -791,7 +610,8 @@ class HafelePDFParser:
     def _parse_valor(v: str) -> float:
         try:
             return float(v.strip().replace('.','').replace(',','.')) if v else 0.0
-        except: return 0.0
+        except Exception:
+            return 0.0
 
     def parse_pdf(self, pdf_path: str) -> Dict:
         try:
@@ -815,15 +635,24 @@ class HafelePDFParser:
                     chunk_lines = []
                     for page in pdf.pages[start:end]:
                         t = page.extract_text(layout=False)
-                        if t: chunk_lines.append(t)
+                        if t:
+                            chunk_lines.append(t)
 
                     chunk_text = self._buffer + "\n".join(chunk_lines)
-                    is_last    = (end == total)
+                    del chunk_lines
+
+                    is_last = (end == total)
                     new_items, self._buffer = self._extract_items_from_chunk(
                         chunk_text, is_last=is_last
                     )
                     items_found.extend(new_items)
-                    del chunk_lines, chunk_text
+                    del chunk_text, new_items
+
+                    # Proteção OOM: buffer residual não pode crescer infinitamente
+                    if len(self._buffer) > self._MAX_BUF_CHARS:
+                        # Mantém apenas os últimos MAX_BUF_CHARS (dados recentes)
+                        self._buffer = self._buffer[-self._MAX_BUF_CHARS:]
+
                     gc.collect()
 
             prog_txt.empty()
@@ -832,6 +661,9 @@ class HafelePDFParser:
             if self._buffer.strip():
                 new_items, _ = self._extract_items_from_chunk(self._buffer, is_last=True)
                 items_found.extend(new_items)
+
+            self._buffer = ""
+            gc.collect()
 
             if not items_found:
                 st.warning("⚠️ Padrão 'ITENS DA DUIMP' não encontrado. Verifique o formato do PDF.")
@@ -846,10 +678,6 @@ class HafelePDFParser:
             return self.documento
 
     def _extract_items_from_chunk(self, text: str, is_last: bool):
-        """
-        Divide o chunk pelo padrão de item do Extrato DUIMP.
-        Retorna (itens_completos, buffer_residual).
-        """
         pattern = r'(ITENS\s+DA\s+DUIMP\s*-\s*\d+)'
         parts = re.split(pattern, text, flags=re.IGNORECASE)
         items_found = []
@@ -865,7 +693,8 @@ class HafelePDFParser:
             m = re.search(r'(\d+)', header)
             num = int(m.group(1)) if m else (i // 2)
             item = self._parse_item_block(num, content)
-            if item: items_found.append(item)
+            if item:
+                items_found.append(item)
 
         if not is_last and len(parts) >= 2:
             last_header  = parts[-2] if len(parts) % 2 == 0 else ""
@@ -912,11 +741,12 @@ class HafelePDFParser:
             if m: item['seguro_internacional'] = pv(m.group(1))
             m = re.search(r'Local Aduaneiro \(R\$\)\s*([\d\.,]+)', text)
             if m:
-                item['local_aduaneiro'] = pv(m.group(1))
-                item['aduaneiro_reais'] = item['local_aduaneiro']
+                item['local_aduaneiro']    = pv(m.group(1))
+                item['aduaneiro_reais']    = item['local_aduaneiro']
                 item['valorAduaneiroReal'] = item['local_aduaneiro']
             tax_pats = re.findall(
-                r'Base de Cálculo.*?\(R\$\)\s*([\d\.,]+).*?% Alíquota\s*([\d\.,]+).*?Valor.*?(?:Devido|A Recolher|Calculado).*?\(R\$\)\s*([\d\.,]+)',
+                r'Base de Cálculo.*?\(R\$\)\s*([\d\.,]+).*?% Alíquota\s*([\d\.,]+)'
+                r'.*?Valor.*?(?:Devido|A Recolher|Calculado).*?\(R\$\)\s*([\d\.,]+)',
                 text, re.DOTALL | re.IGNORECASE)
             for base_s, aliq_s, val_s in tax_pats:
                 base = pv(base_s); aliq = pv(aliq_s); val = pv(val_s)
@@ -928,12 +758,15 @@ class HafelePDFParser:
                     item['ii_aliquota']=aliq; item['ii_base_calculo']=base; item['ii_valor_devido']=val
                 elif aliq>=0 and item['ipi_aliquota']==0:
                     item['ipi_aliquota']=aliq; item['ipi_base_calculo']=base; item['ipi_valor_devido']=val
-            item['total_impostos']=(item['ii_valor_devido']+item['ipi_valor_devido']
-                                    +item['pis_valor_devido']+item['cofins_valor_devido'])
-            item['valor_total_com_impostos']=item['valor_total']+item['total_impostos']
+            item['total_impostos'] = (
+                item['ii_valor_devido'] + item['ipi_valor_devido']
+                + item['pis_valor_devido'] + item['cofins_valor_devido']
+            )
+            item['valor_total_com_impostos'] = item['valor_total'] + item['total_impostos']
             return item
         except Exception as e:
-            logger.error(f"Erro item {item_num}: {e}"); return None
+            logger.error(f"Erro item {item_num}: {e}")
+            return None
 
     def _calculate_totals(self):
         if self.documento['itens']:
@@ -958,8 +791,6 @@ class SigrawebPDFParser:
     """
     Parser para o layout Sigraweb — Conferência do Processo Detalhado.
     Processa em lotes de _PDF_CHUNK_PAGES páginas.
-    Fase 1: extrai cabeçalho das 2 primeiras páginas.
-    Fase 2: processa adições em chunks liberando memória a cada lote.
     """
 
     def __init__(self):
@@ -969,14 +800,17 @@ class SigrawebPDFParser:
     def _parse_valor(v: str) -> float:
         try:
             return float(str(v).strip().replace('.','').replace(',','.')) if v else 0.0
-        except: return 0.0
+        except Exception:
+            return 0.0
 
     @staticmethod
     def _fmt_date(d: str) -> str:
         try:
             return datetime.strptime(d.strip(), '%d/%m/%Y').strftime('%Y%m%d')
-        except:
+        except Exception:
             return d.replace('/','').replace('-','')[:8]
+
+    _MAX_BUF_CHARS = 500_000  # ~500KB — proteção OOM
 
     def parse_pdf(self, pdf_path: str) -> Dict:
         try:
@@ -989,13 +823,11 @@ class SigrawebPDFParser:
                 total = len(pdf.pages)
                 chunk = _PDF_CHUNK_PAGES
 
-                # Fase 1: cabeçalho (primeiras 2 páginas)
                 p1 = pdf.pages[0].extract_text(layout=False) or "" if total > 0 else ""
                 p2 = pdf.pages[1].extract_text(layout=False) or "" if total > 1 else ""
                 self._extract_header(p1, p2)
                 del p1, p2
 
-                # Fase 2: adições em chunks
                 for start in range(0, total, chunk):
                     end = min(start + chunk, total)
                     prog_txt.text(
@@ -1007,15 +839,23 @@ class SigrawebPDFParser:
                     chunk_pages = []
                     for page in pdf.pages[start:end]:
                         t = page.extract_text(layout=False)
-                        if t: chunk_pages.append(t)
+                        if t:
+                            chunk_pages.append(t)
 
                     chunk_text = buffer + "\n".join(chunk_pages)
+                    del chunk_pages
+
                     is_last    = (end == total)
                     new_items, buffer = self._extract_items_from_chunk(
                         chunk_text, is_last=is_last
                     )
                     items_found.extend(new_items)
-                    del chunk_pages, chunk_text
+                    del chunk_text, new_items
+
+                    # Proteção OOM: buffer residual não pode crescer infinitamente
+                    if len(buffer) > self._MAX_BUF_CHARS:
+                        buffer = buffer[-self._MAX_BUF_CHARS:]
+
                     gc.collect()
 
             prog_txt.empty()
@@ -1024,6 +864,9 @@ class SigrawebPDFParser:
             if buffer.strip():
                 new_items, _ = self._extract_items_from_chunk(buffer, is_last=True)
                 items_found.extend(new_items)
+
+            buffer = ""
+            gc.collect()
 
             if not items_found:
                 st.warning("⚠️ Nenhuma adição detectada no PDF Sigraweb.")
@@ -1038,10 +881,6 @@ class SigrawebPDFParser:
             return self.documento
 
     def _extract_items_from_chunk(self, text: str, is_last: bool):
-        """
-        Divide o chunk pelo padrão de adição do Sigraweb.
-        Retorna (itens_completos, buffer_residual).
-        """
         pattern = r'Informações da Adição Nº:\s*(\d+)'
         parts   = re.split(pattern, text)
         items_found = []
@@ -1055,7 +894,8 @@ class SigrawebPDFParser:
             num_str = parts[i].strip()
             content = parts[i+1] if (i+1) < len(parts) else ''
             item    = self._parse_item_block(num_str, content)
-            if item: items_found.append(item)
+            if item:
+                items_found.append(item)
 
         if not is_last and len(parts) >= 2:
             last_num     = parts[-2] if len(parts) % 2 == 0 else ""
@@ -1111,8 +951,43 @@ class SigrawebPDFParser:
         h['cifBRL']   = _f(r'CIF:.*?;\s*([\d\.,]+)\s*\(BRL\)', combined)
         h['valorAduaneiroUSD'] = _f(r'Valor Aduaneiro:\s*([\d\.,]+)\s*\(USD\)', combined)
         h['valorAduaneiroBRL'] = _f(r'Valor Aduaneiro:.*?;\s*([\d\.,]+)\s*\(BRL\)', combined)
+
+        # ── NOVO: tabela "Despesas do Processo" + "Tributos" (Conferência do Processo Detalhado) ──
+        # Layout real extraído via pdfplumber:
+        #   DESPESA MOEDA VALOR ORIG. VALOR DÓLAR VALOR REAL
+        #   FOB 978 - EURO/COM.EUROPEIA 25.726,77 29.827,53 151.049,58
+        #   ...
+        #   VALOR ADUANEIRO 30.678,35 155.358,21
+        #   ...
+        #   II IPI PIS COFINS SISCOMEX Banco Agência Conta
+        #   24.857,31 0,00 3.262,53 14.992,06 154,23 Itau 3715 31627-3
+        m_fob = re.search(
+            r'FOB\s+\d+\s*-\s*\S.*?\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s*\n',
+            p1)
+        h['despesasFobOrig']  = m_fob.group(1) if m_fob else ''
+        h['despesasFobDolar'] = m_fob.group(2) if m_fob else ''
+        h['despesasFobReal']  = m_fob.group(3) if m_fob else ''
+
+        m_adu = re.search(r'VALOR ADUANEIRO\s+([\d\.,]+)\s+([\d\.,]+)', p1)
+        h['despesasAduaneiroDolar'] = m_adu.group(1) if m_adu else ''
+        h['despesasAduaneiroReal']  = m_adu.group(2) if m_adu else ''
+
+        m_trib = re.search(
+            r'II IPI PIS COFINS SISCOMEX.*?\n'
+            r'([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+(\w+)\s+(\d+)\s+([\w\-]+)',
+            p1)
+        h['tributosII']       = m_trib.group(1) if m_trib else ''
+        h['tributosIPI']      = m_trib.group(2) if m_trib else ''
+        h['tributosPIS']      = m_trib.group(3) if m_trib else ''
+        h['tributosCOFINS']   = m_trib.group(4) if m_trib else ''
+        h['tributosSiscomex'] = m_trib.group(5) if m_trib else ''
+        h['tributosBanco']    = m_trib.group(6) if m_trib else ''
+        h['tributosAgencia']  = m_trib.group(7) if m_trib else ''
+        h['tributosConta']    = m_trib.group(8) if m_trib else ''
+
         tm = re.search(
-            r'([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+Itau\s+(\d+)\s+([\d\-]+)',
+            r'([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)\s+([\d\.,]+)'
+            r'\s+Itau\s+(\d+)\s+([\d\-]+)',
             p1)
         if tm:
             h['totalII']=tm.group(1); h['totalIPI']=tm.group(2)
@@ -1149,8 +1024,9 @@ class SigrawebPDFParser:
             }
             m = re.search(r'NR NCM:\s*(\d+)', text)
             if m: item['ncm'] = m.group(1)
-            m = re.search(r'Part Number:\s*([\S]+)\s*\|\s*Descrição:\s*(.+?)(?=\nFabricante:|$)',
-                          text, re.DOTALL)
+            m = re.search(
+                r'Part Number:\s*([\S]+)\s*\|\s*Descrição:\s*(.+?)(?=\nFabricante:|$)',
+                text, re.DOTALL)
             if m:
                 item['codigo_interno'] = m.group(1).strip()
                 item['descricao']      = re.sub(r'\s+',' ', m.group(2).strip())
@@ -1179,36 +1055,60 @@ class SigrawebPDFParser:
             m = re.search(r'Valor Frete:\s*([\d\.,]+)\s+USD', text)
             if m: item['freteUSD'] = pv(m.group(1))
             m = re.search(r'Valor Frete Real:\s*([\d\.,]+)', text)
-            if m: item['freteReal'] = pv(m.group(1)); item['frete_internacional'] = item['freteReal']
+            if m:
+                item['freteReal'] = pv(m.group(1))
+                item['frete_internacional'] = item['freteReal']
             m = re.search(r'Valor Seguro:\s*([\d\.,]+)\s+USD', text)
             if m: item['seguroUSD'] = pv(m.group(1))
             m = re.search(r'Valor Seguro Real:\s*([\d\.,]+)', text)
-            if m: item['seguroReal'] = pv(m.group(1)); item['seguro_internacional'] = item['seguroReal']
+            if m:
+                item['seguroReal'] = pv(m.group(1))
+                item['seguro_internacional'] = item['seguroReal']
             m = re.search(r'Moeda LI:\s*(.+?)(?:\n|Valor)', text)
             if m: item['moeda'] = m.group(1).strip()
             m = re.search(r'País Origem:\s*(.+?)(?:\n|Fabricante)', text)
             if m: item['paisOrigem'] = m.group(1).strip()
             m = re.search(r'Fornecedor:\s*(.+?)(?:\n|País)', text)
             if m: item['fornecedor_raw'] = m.group(1).strip()
-            # Tributos — II (7 cols), IPI/PIS/COFINS (6 cols)
-            m = re.search(r'^II\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
-                          text, re.MULTILINE)
-            if m: item['ii_aliquota']=pv(m.group(1)); item['ii_base_calculo']=pv(m.group(2)); item['ii_valor_devido']=pv(m.group(3))
-            m = re.search(r'^IPI\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
-                          text, re.MULTILINE)
-            if m: item['ipi_aliquota']=pv(m.group(1)); item['ipi_base_calculo']=pv(m.group(2)); item['ipi_valor_devido']=pv(m.group(3))
-            m = re.search(r'^PIS\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
-                          text, re.MULTILINE)
-            if m: item['pis_aliquota']=pv(m.group(1)); item['pis_base_calculo']=pv(m.group(2)); item['pis_valor_devido']=pv(m.group(3))
-            m = re.search(r'^COFINS\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+([\d\.,]+)\s+([\d\.,]+)',
-                          text, re.MULTILINE)
-            if m: item['cofins_aliquota']=pv(m.group(1)); item['cofins_base_calculo']=pv(m.group(2)); item['cofins_valor_devido']=pv(m.group(3))
-            item['total_impostos'] = (item['ii_valor_devido']+item['ipi_valor_devido']
-                                      +item['pis_valor_devido']+item['cofins_valor_devido'])
-            item['valor_total_com_impostos'] = pv(str(item['valorTotal']))+item['total_impostos']
+            m = re.search(
+                r'^II\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+'
+                r'([\d\.,]+)\s+([\d\.,]+)', text, re.MULTILINE)
+            if m:
+                item['ii_aliquota']=pv(m.group(1))
+                item['ii_base_calculo']=pv(m.group(2))
+                item['ii_valor_devido']=pv(m.group(3))
+            m = re.search(
+                r'^IPI\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+'
+                r'([\d\.,]+)\s+([\d\.,]+)', text, re.MULTILINE)
+            if m:
+                item['ipi_aliquota']=pv(m.group(1))
+                item['ipi_base_calculo']=pv(m.group(2))
+                item['ipi_valor_devido']=pv(m.group(3))
+            m = re.search(
+                r'^PIS\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+'
+                r'([\d\.,]+)\s+([\d\.,]+)', text, re.MULTILINE)
+            if m:
+                item['pis_aliquota']=pv(m.group(1))
+                item['pis_base_calculo']=pv(m.group(2))
+                item['pis_valor_devido']=pv(m.group(3))
+            m = re.search(
+                r'^COFINS\s+([\d\.,]+)\s+[\d\.,]+\s+[\d\.,]+\s+[\d\.,]+\s+'
+                r'([\d\.,]+)\s+([\d\.,]+)', text, re.MULTILINE)
+            if m:
+                item['cofins_aliquota']=pv(m.group(1))
+                item['cofins_base_calculo']=pv(m.group(2))
+                item['cofins_valor_devido']=pv(m.group(3))
+            item['total_impostos'] = (
+                item['ii_valor_devido'] + item['ipi_valor_devido']
+                + item['pis_valor_devido'] + item['cofins_valor_devido']
+            )
+            item['valor_total_com_impostos'] = (
+                pv(str(item['valorTotal'])) + item['total_impostos']
+            )
             return item
         except Exception as e:
-            logger.error(f"Erro item {num_str}: {e}"); return None
+            logger.error(f"Erro item {num_str}: {e}")
+            return None
 
     def _calculate_totals(self):
         if self.documento['itens']:
@@ -1232,99 +1132,216 @@ class SigrawebPDFParser:
 # PARTE 4 — montar_descricao_final + DuimpPDFParser
 # ==============================================================================
 def montar_descricao_final(desc_complementar, codigo_extra, detalhamento):
-    return f"{str(desc_complementar).strip()} - {str(codigo_extra).strip()} - {str(detalhamento).strip()}"
+    """
+    Monta a descricao final da mercadoria para o XML.
+
+    O Sigraweb nao tem layout consistente entre adicoes:
+    - As vezes 'Detalhamento do Produto' contem o codigo (ex: '25191992 - 10')
+      e 'Descricao complementar' contem a descricao longa.
+    - As vezes e o inverso.
+
+    Esta funcao detecta automaticamente qual campo contem o codigo numerico
+    (padrao: apenas digitos com hifen, ex '25249306 - 10' ou '25191992-10')
+    e qual contem a descricao textual, organizando:
+    resultado: DESCRICAO - NUMBER - CODIGO
+    """
+    import re as _re
+    _PADRAO_CODIGO = _re.compile(r'^\s*\d{5,10}\s*[-\u2013]\s*\d{1,4}\s*$')
+    s_compl  = str(desc_complementar).strip()
+    s_detalh = str(detalhamento).strip()
+    s_extra  = str(codigo_extra).strip()
+    compl_eh_codigo  = bool(_PADRAO_CODIGO.match(s_compl))
+    detalh_eh_codigo = bool(_PADRAO_CODIGO.match(s_detalh))
+    if compl_eh_codigo and not detalh_eh_codigo:
+        # Caso A: desc_complementar = codigo, detalhamento = descricao
+        _codigo   = s_compl
+        _descricao = s_detalh
+    elif detalh_eh_codigo and not compl_eh_codigo:
+        # Caso B: detalhamento = codigo, desc_complementar = descricao
+        _codigo   = s_detalh
+        _descricao = s_compl
+    else:
+        # Fallback: comportamento original sem troca
+        _codigo   = s_compl
+        _descricao = s_detalh
+    partes = [p for p in [_descricao, s_extra, _codigo] if p and p not in ('None', '0', '')]
+    return ' - '.join(partes)
 
 
 class DuimpPDFParser:
     """
-    Parser do App 1 (Extrato DUIMP / Siscomex).
-    CORREÇÃO DE MEMÓRIA:
-    - Recebe path em disco (não bytes em RAM) → zero cópia dupla do PDF
-    - Processa em lotes de _PDF_CHUNK_PAGES páginas via fitz
+    Parser de DUIMP com processamento STREAMING — nunca acumula o texto
+    completo na memória. Extrai cabeçalho e itens página a página,
+    mantendo apenas um buffer residual mínimo entre chunks.
     """
-    def __init__(self, pdf_path: str):
-        self.pdf_path  = pdf_path   # path em disco — não bytes em memória
-        self.full_text = ""
-        self.header    = {}
-        self.items     = []
 
+    def __init__(self, pdf_path: str):
+        self.pdf_path = pdf_path
+        # full_text REMOVIDO — substituído por processamento streaming
+        self.header   = {}
+        self.items    = []
+        # Buffer interno usado APENAS durante parse (liberado ao final)
+        self._buf     = ""
+
+    # ------------------------------------------------------------------
+    # Filtra uma linha do PDF (remove ruído de paginação)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _filter(line: str) -> bool:
+        ls = line.strip()
+        if not ls:                                      return False
+        if "Extrato da DUIMP" in ls:                   return False
+        if "Data, hora e responsável" in ls:           return False
+        if re.match(r'^\d+\s*/\s*\d+$', ls):          return False
+        return True
+
+    # ------------------------------------------------------------------
+    # preprocess() + extract_header() + extract_items() fundidos em um
+    # único passo streaming — lê, filtra, extrai e descarta por chunk.
+    # ------------------------------------------------------------------
     def preprocess(self):
         """
-        Lê páginas em chunks, filtra ruído e acumula texto limpo.
-        Usa fitz.open(path) — sem cópia do PDF em RAM.
+        Lê o PDF em blocos de _PDF_CHUNK_PAGES páginas.
+        Extrai cabeçalho das primeiras páginas e itens incrementalmente.
+        NUNCA mantém o texto completo em memória simultaneamente.
         """
         prog_txt = st.empty()
         prog_bar = st.progress(0)
-        doc      = fitz.open(self.pdf_path)     # path, não stream
+        doc      = fitz.open(self.pdf_path)
         total    = doc.page_count
-        parts    = []
+        self._buf = ""
 
         for start in range(0, total, _PDF_CHUNK_PAGES):
             end = min(start + _PDF_CHUNK_PAGES, total)
-            prog_txt.text(f"Pré-processando páginas {start+1}–{end} de {total} (DUIMP)...")
+            prog_txt.text(f"Processando páginas {start+1}–{end} de {total} (DUIMP)...")
             prog_bar.progress(end / total)
 
-            chunk_lines = []
+            # Extrai texto do chunk e filtra linhas de ruído
+            lines = []
             for idx in range(start, end):
                 page = doc[idx]
                 for line in page.get_text("text").split('\n'):
-                    ls = line.strip()
-                    if "Extrato da DUIMP" in ls: continue
-                    if "Data, hora e responsável" in ls: continue
-                    if re.match(r'^\d+\s*/\s*\d+$', ls): continue
-                    chunk_lines.append(line)
-                page = None  # libera ref da página
+                    if self._filter(line):
+                        lines.append(line)
+                page = None   # libera objeto página imediatamente
 
-            parts.append("\n".join(chunk_lines))
-            del chunk_lines
+            chunk_text = "\n".join(lines)
+            del lines
+            gc.collect()
+
+            # Extrai cabeçalho apenas das primeiras páginas (chunk 0)
+            if start == 0 and not self.header:
+                self._extract_header_from_chunk(chunk_text)
+
+            # Extrai itens incrementalmente com buffer residual
+            self._buf, new_items = self._extract_items_streaming(
+                self._buf + chunk_text, is_last=(end == total)
+            )
+            self.items.extend(new_items)
+
+            del chunk_text
             gc.collect()
 
         doc.close()
         prog_txt.empty()
         prog_bar.empty()
 
-        self.full_text = "\n".join(parts)
-        del parts
+        # Processa qualquer residual final
+        if self._buf.strip():
+            _, remaining = self._extract_items_streaming(self._buf, is_last=True)
+            self.items.extend(remaining)
+
+        self._buf = ""  # libera buffer
         gc.collect()
 
     def extract_header(self):
-        t = self.full_text
-        self.header["numeroDUIMP"]    = self._r(r"Extrato da Duimp\s+([\w\-\/]+)", t)
-        self.header["cnpj"]           = self._r(r"CNPJ do importador:\s*([\d\.\/\-]+)", t)
-        self.header["nomeImportador"] = self._r(r"Nome do importador:\s*\n?(.+)", t)
-        self.header["pesoBruto"]      = self._r(r"Peso Bruto \(kg\):\s*([\d\.,]+)", t)
-        self.header["pesoLiquido"]    = self._r(r"Peso Liquido \(kg\):\s*([\d\.,]+)", t)
-        self.header["urf"]            = self._r(r"Unidade de despacho:\s*([\d]+)", t)
-        self.header["paisProcedencia"]= self._r(r"País de Procedência:\s*\n?(.+)", t)
+        """Compatibilidade — cabeçalho já extraído em preprocess()."""
+        pass  # já feito no streaming
 
     def extract_items(self):
-        chunks = re.split(r"Item\s+(\d+)", self.full_text)
-        if len(chunks) > 1:
-            for i in range(1, len(chunks), 2):
-                num = chunks[i]; content = chunks[i+1]
-                item = {"numeroAdicao": num}
-                item["ncm"]        = self._r(r"NCM:\s*([\d\.]+)", content)
-                item["paisOrigem"] = self._r(r"País de origem:\s*\n?(.+)", content)
-                item["quantidade"] = self._r(r"Quantidade na unidade estatística:\s*([\d\.,]+)", content)
-                item["quantidade_comercial"] = self._r(r"Quantidade na unidade comercializada:\s*([\d\.,]+)", content)
-                item["unidade"]    = self._r(r"Unidade estatística:\s*(.+)", content)
-                item["pesoLiq"]    = self._r(r"Peso líquido \(kg\):\s*([\d\.,]+)", content)
-                item["valorUnit"]  = self._r(r"Valor unitário na condição de venda:\s*([\d\.,]+)", content)
-                item["valorTotal"] = self._r(r"Valor total na condição de venda:\s*([\d\.,]+)", content)
-                item["moeda"]      = self._r(r"Moeda negociada:\s*(.+)", content)
-                m = re.search(r"Código do Exportador Estrangeiro:\s*(.+?)(?=\n\s*(?:Endereço|Dados))",
-                              content, re.DOTALL)
-                item["fornecedor_raw"] = m.group(1).strip() if m else ""
-                m = re.search(r"Endereço:\s*(.+?)(?=\n\s*(?:Dados da Mercadoria|Aplicação))",
-                              content, re.DOTALL)
-                item["endereco_raw"] = m.group(1).strip() if m else ""
-                m = re.search(r"Detalhamento do Produto:\s*(.+?)(?=\n\s*(?:Número de Identificação|Versão|Código de Class|Descrição complementar))",
-                              content, re.DOTALL)
-                item["descricao"] = m.group(1).strip() if m else ""
-                m = re.search(r"Descrição complementar da mercadoria:\s*(.+?)(?=\n|$)",
-                              content, re.DOTALL)
-                item["desc_complementar"] = m.group(1).strip() if m else ""
-                self.items.append(item)
+        """Compatibilidade — itens já extraídos em preprocess()."""
+        pass  # já feito no streaming
+
+    # ------------------------------------------------------------------
+    # Extração de cabeçalho a partir de um bloco de texto
+    # ------------------------------------------------------------------
+    def _extract_header_from_chunk(self, text: str):
+        self.header["numeroDUIMP"]    = self._r(r"Extrato da Duimp\s+([\w\-\/]+)", text)
+        self.header["cnpj"]           = self._r(r"CNPJ do importador:\s*([\d\.\/\-]+)", text)
+        self.header["nomeImportador"] = self._r(r"Nome do importador:\s*\n?(.+)", text)
+        self.header["pesoBruto"]      = self._r(r"Peso Bruto \(kg\):\s*([\d\.,]+)", text)
+        self.header["pesoLiquido"]    = self._r(r"Peso Liquido \(kg\):\s*([\d\.,]+)", text)
+        self.header["urf"]            = self._r(r"Unidade de despacho:\s*([\d]+)", text)
+        self.header["paisProcedencia"]= self._r(r"País de Procedência:\s*\n?(.+)", text)
+
+    # ------------------------------------------------------------------
+    # Extração streaming de itens — retorna (buffer_residual, [itens])
+    # ------------------------------------------------------------------
+    def _extract_items_streaming(self, text: str, is_last: bool):
+        """
+        Divide o texto pelo padrão 'Item N', processa os blocos completos
+        e retorna o bloco final incompleto como buffer para o próximo chunk.
+        Nunca guarda mais do que um bloco de item por vez na memória.
+        """
+        parts = re.split(r"Item\s+(\d+)", text)
+        items_found = []
+
+        if len(parts) <= 1:
+            residual = "" if is_last else text
+            return residual, items_found
+
+        # Quantos blocos podemos processar com segurança
+        # Se não é último chunk, o último bloco pode estar incompleto
+        n_safe = len(parts) - 1 if not is_last else len(parts)
+
+        for i in range(1, n_safe, 2):
+            num     = parts[i]
+            content = parts[i + 1] if (i + 1) < len(parts) else ""
+            item    = self._parse_item_block(num, content)
+            if item:
+                items_found.append(item)
+            # Libera conteúdo do bloco imediatamente após parsear
+            parts[i + 1] = ""
+
+        # Buffer residual = último bloco incompleto
+        if not is_last and len(parts) >= 2:
+            last_num     = parts[-2] if len(parts) % 2 == 0 else ""
+            last_content = parts[-1]
+            residual = (f"Item {last_num}\n" if last_num else "") + last_content
+        else:
+            residual = ""
+
+        del parts
+        return residual, items_found
+
+    # ------------------------------------------------------------------
+    # Parseia um bloco de item individual
+    # ------------------------------------------------------------------
+    def _parse_item_block(self, num: str, content: str) -> Optional[Dict]:
+        item = {"numeroAdicao": num.strip()}
+        item["ncm"]                  = self._r(r"NCM:\s*([\d\.]+)", content)
+        item["paisOrigem"]           = self._r(r"País de origem:\s*\n?(.+)", content)
+        item["quantidade"]           = self._r(r"Quantidade na unidade estatística:\s*([\d\.,]+)", content)
+        item["quantidade_comercial"] = self._r(r"Quantidade na unidade comercializada:\s*([\d\.,]+)", content)
+        item["unidade"]              = self._r(r"Unidade estatística:\s*(.+)", content)
+        item["pesoLiq"]              = self._r(r"Peso líquido \(kg\):\s*([\d\.,]+)", content)
+        item["valorUnit"]            = self._r(r"Valor unitário na condição de venda:\s*([\d\.,]+)", content)
+        item["valorTotal"]           = self._r(r"Valor total na condição de venda:\s*([\d\.,]+)", content)
+        item["moeda"]                = self._r(r"Moeda negociada:\s*(.+)", content)
+        m = re.search(r"Código do Exportador Estrangeiro:\s*(.+?)(?=\n\s*(?:Endereço|Dados))",
+                      content, re.DOTALL)
+        item["fornecedor_raw"] = m.group(1).strip() if m else ""
+        m = re.search(r"Endereço:\s*(.+?)(?=\n\s*(?:Dados da Mercadoria|Aplicação))",
+                      content, re.DOTALL)
+        item["endereco_raw"] = m.group(1).strip() if m else ""
+        m = re.search(r"Detalhamento do Produto:\s*(.+?)"
+                      r"(?=\n\s*(?:Número de Identificação|Versão|Código de Class|Descrição complementar))",
+                      content, re.DOTALL)
+        item["descricao"] = m.group(1).strip() if m else ""
+        m = re.search(r"Descrição complementar da mercadoria:\s*(.+?)(?=\n|$)",
+                      content, re.DOTALL)
+        item["desc_complementar"] = m.group(1).strip() if m else ""
+        return item
 
     def _r(self, pat, text):
         m = re.search(pat, text)
@@ -1593,7 +1610,8 @@ class DataFormatter:
             if isinstance(value, str):
                 value = value.replace('.','').replace(',','.')
             return str(int(round(float(value)*100))).zfill(length)
-        except: return "0"*length
+        except Exception:
+            return "0"*length
 
     @staticmethod
     def format_high_precision(value, length=15):
@@ -1601,7 +1619,8 @@ class DataFormatter:
             if isinstance(value, str):
                 value = value.replace('.','').replace(',','.')
             return str(int(round(float(value)*10000000))).zfill(length)
-        except: return "0"*length
+        except Exception:
+            return "0"*length
 
     @staticmethod
     def format_quantity(value, length=14):
@@ -1609,16 +1628,18 @@ class DataFormatter:
             if isinstance(value, str):
                 value = value.replace('.','').replace(',','.')
             return str(int(round(float(value)*100000))).zfill(length)
-        except: return "0"*length
+        except Exception:
+            return "0"*length
 
     @staticmethod
     def calculate_cbs_ibs(base_xml_string):
         try:
-            bf = int(base_xml_string)/100.0
+            bf  = int(base_xml_string)/100.0
             cbs = str(int(round(bf*0.009*100))).zfill(14)
             ibs = str(int(round(bf*0.001*100))).zfill(14)
             return cbs, ibs
-        except: return "0".zfill(14), "0".zfill(14)
+        except Exception:
+            return "0".zfill(14), "0".zfill(14)
 
     @staticmethod
     def parse_supplier_info(raw_name, raw_addr):
@@ -1627,13 +1648,14 @@ class DataFormatter:
             parts = raw_name.split('-',1)
             data["fornecedorNome"] = parts[-1].strip() if len(parts)>1 else raw_name.strip()
         if raw_addr:
-            ca = DataFormatter.clean_text(raw_addr)
+            ca  = DataFormatter.clean_text(raw_addr)
             pd_ = ca.rsplit('-',1)
             if len(pd_)>1:
                 data["fornecedorCidade"] = pd_[1].strip()
                 street = pd_[0].strip()
             else:
-                data["fornecedorCidade"] = "EXTERIOR"; street = ca
+                data["fornecedorCidade"] = "EXTERIOR"
+                street = ca
             cs = street.rsplit(',',1)
             if len(cs)>1:
                 data["fornecedorLogradouro"] = cs[0].strip()
@@ -1660,7 +1682,8 @@ class XMLBuilder:
             try:
                 if isinstance(val,str): val=val.replace('.','').replace(',','.')
                 return float(val)
-            except: return 0.0
+            except Exception:
+                return 0.0
 
         for it in self.items_to_use:
             totals["frete"]  += gf(it.get("Frete (R$)"))
@@ -1764,8 +1787,10 @@ class XMLBuilder:
                 if k in user_inputs: fmap[k] = user_inputs[k]
 
         receitas = [
-            {"code":"0086","val":totals["ii"]},{"code":"1038","val":totals["ipi"]},
-            {"code":"5602","val":totals["pis"]},{"code":"5629","val":totals["cofins"]},
+            {"code":"0086","val":totals["ii"]},
+            {"code":"1038","val":totals["ipi"]},
+            {"code":"5602","val":totals["pis"]},
+            {"code":"5629","val":totals["cofins"]},
         ]
         if user_inputs and user_inputs.get("valorReceita7811","0") not in ("0","000000000000000"):
             receitas.append({"code":"7811","val":float(user_inputs["valorReceita7811"])})
@@ -1774,12 +1799,13 @@ class XMLBuilder:
             if tag == "embalagem" and user_inputs:
                 parent = etree.SubElement(self.duimp, tag)
                 for sf in dval:
-                    v = user_inputs.get("quantidadeVolume", sf["default"]) if sf["tag"]=="quantidadeVolume" else sf["default"]
+                    v = (user_inputs.get("quantidadeVolume", sf["default"])
+                         if sf["tag"] == "quantidadeVolume" else sf["default"])
                     etree.SubElement(parent, sf["tag"]).text = v
                 continue
             if tag == "pagamento":
                 agencia = user_inputs.get("agenciaPagamento","3715") if user_inputs else "3715"
-                banco   = user_inputs.get("bancoPagamento","341")   if user_inputs else "341"
+                banco   = user_inputs.get("bancoPagamento","341")    if user_inputs else "341"
                 for rec in receitas:
                     if rec["val"] > 0:
                         pag = etree.SubElement(self.duimp, "pagamento")
@@ -1792,12 +1818,15 @@ class XMLBuilder:
                             etree.SubElement(pag, "valorReceita").text = DataFormatter.format_input_fiscal(rec["val"])
                 continue
             if tag in fmap:
-                etree.SubElement(self.duimp, tag).text = fmap[tag]; continue
+                etree.SubElement(self.duimp, tag).text = fmap[tag]
+                continue
             if user_inputs and tag in user_inputs:
-                etree.SubElement(self.duimp, tag).text = user_inputs[tag]; continue
+                etree.SubElement(self.duimp, tag).text = user_inputs[tag]
+                continue
             if isinstance(dval, list):
                 parent = etree.SubElement(self.duimp, tag)
-                for sf in dval: etree.SubElement(parent, sf["tag"]).text = sf["default"]
+                for sf in dval:
+                    etree.SubElement(parent, sf["tag"]).text = sf["default"]
             elif isinstance(dval, dict):
                 parent = etree.SubElement(self.duimp, tag)
                 etree.SubElement(parent, dval["tag"]).text = dval["default"]
@@ -1814,14 +1843,18 @@ class XMLBuilder:
 def _merge_app2_items(df_dest: pd.DataFrame, itens: list) -> tuple:
     src_map: Dict[int, Dict] = {}
     for item in itens:
-        try: src_map[int(item['numero_item'])] = item
-        except Exception: pass
+        try:
+            src_map[int(item['numero_item'])] = item
+        except Exception:
+            pass
 
     count, not_found = 0, []
     for idx, row in df_dest.iterrows():
         try:
             num = int(str(row['numeroAdicao']).strip())
-            if num not in src_map: not_found.append(num); continue
+            if num not in src_map:
+                not_found.append(num)
+                continue
             src = src_map[num]
             df_dest.at[idx,'NUMBER']           = src.get('codigo_interno','')
             df_dest.at[idx,'Frete (R$)']       = src.get('frete_internacional',0.0)
@@ -1844,12 +1877,14 @@ def _merge_app2_items(df_dest: pd.DataFrame, itens: list) -> tuple:
             df_dest.at[idx,'COFINS Base (R$)'] = src.get('cofins_base_calculo',0.0)
             df_dest.at[idx,'COFINS Alíq. (%)'] = src.get('cofins_aliquota',0.0)
             count += 1
-        except Exception: continue
+        except Exception:
+            continue
     return df_dest, count, not_found
 
 
 def _render_totais_grade(df: pd.DataFrame):
-    def _s(col): return pd.to_numeric(df[col], errors='coerce').sum() if col in df.columns else 0
+    def _s(col):
+        return pd.to_numeric(df[col], errors='coerce').sum() if col in df.columns else 0
     t1,t2,t3,t4,t5,t6 = st.columns(6)
     t1.metric("II Total",     f"R$ {_s('II (R$)'):,.2f}")
     t2.metric("IPI Total",    f"R$ {_s('IPI (R$)'):,.2f}")
@@ -1876,7 +1911,6 @@ def sistema_integrado_duimp():
     # TAB 1 — UPLOAD & VINCULAÇÃO
     # ══════════════════════════════════════════════════════════════════════
     with tab_up:
-        # ── Seletor de layout ─────────────────────────────────────────────
         section_title("⚙️ Formato do Arquivo de Tributos (APP2)")
         col_radio, col_badge = st.columns([3, 1], gap="large")
 
@@ -1905,8 +1939,6 @@ def sistema_integrado_duimp():
             ph(f'<div class="{bc}">{btx}</div>')
 
         st.divider()
-
-        # ── Upload ────────────────────────────────────────────────────────
         section_title("📂 Carregar Arquivos")
         c1, c2 = st.columns(2, gap="large")
 
@@ -1926,19 +1958,15 @@ def sistema_integrado_duimp():
             key2  = "Arquivo Sigraweb (PDF)" if is_sgw else "Arquivo Extrato DUIMP (PDF)"
             file_app2 = st.file_uploader(key2, type="pdf", key="u2")
 
-        # ── Processar APP1 (DUIMP) ────────────────────────────────────────
-        # Salva em tempfile antes de passar ao DuimpPDFParser.
-        # Evita carregar o PDF inteiro em RAM duas vezes.
         if file_duimp:
             if (st.session_state["parsed_duimp"] is None or
-                    file_duimp.name != getattr(st.session_state.get("last_duimp"),"name","")):
+                    file_duimp.name != getattr(st.session_state.get("last_duimp"), "name", "")):
                 _td_path = None
                 try:
                     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as _td:
                         _td.write(file_duimp.read())
                         _td_path = _td.name
-
-                    p = DuimpPDFParser(_td_path)   # path, não bytes
+                    p = DuimpPDFParser(_td_path)
                     p.preprocess(); p.extract_header(); p.extract_items()
                     st.session_state["parsed_duimp"] = p
                     st.session_state["last_duimp"]   = file_duimp
@@ -1955,13 +1983,15 @@ def sistema_integrado_duimp():
                     st.error(f"Erro ao ler DUIMP: {e}")
                 finally:
                     if _td_path and os.path.exists(_td_path):
-                        try: os.unlink(_td_path)
-                        except Exception: pass
+                        try:
+                            os.unlink(_td_path)
+                        except Exception:
+                            pass
 
-        # ── Processar APP2 ────────────────────────────────────────────────
         if file_app2 and st.session_state["parsed_sigraweb"] is None:
             with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
-                tmp.write(file_app2.getvalue()); tmp_path = tmp.name
+                tmp.write(file_app2.getvalue())
+                tmp_path = tmp.name
             try:
                 parser_a2 = SigrawebPDFParser() if is_sgw else HafelePDFParser()
                 doc_a2    = parser_a2.parse_pdf(tmp_path)
@@ -2004,17 +2034,18 @@ def sistema_integrado_duimp():
                 st.code(traceback.format_exc())
             finally:
                 if os.path.exists(tmp_path):
-                    try: os.unlink(tmp_path)
-                    except Exception: pass
+                    try:
+                        os.unlink(tmp_path)
+                    except Exception:
+                        pass
 
-        # ── Ações ─────────────────────────────────────────────────────────
         st.divider()
         section_title("🔗 Ações")
         col_btn, col_reset = st.columns([2, 1], gap="large")
 
         with col_btn:
             if st.button("🔗 VINCULAR DADOS (Cruzamento Automático)",
-                         type="primary", use_container_width=True):
+                         type="primary", **_WS):
                 if (st.session_state["merged_df"] is not None and
                         st.session_state["parsed_sigraweb"] is not None):
                     try:
@@ -2027,7 +2058,8 @@ def sistema_integrado_duimp():
                         with st.expander("📊 Resumo da Vinculação"):
                             _render_totais_grade(df_dest)
                     except Exception as e:
-                        st.error(f"Erro na vinculação: {e}"); st.code(traceback.format_exc())
+                        st.error(f"Erro na vinculação: {e}")
+                        st.code(traceback.format_exc())
                 else:
                     st.warning("Carregue os dois arquivos antes de vincular.")
 
@@ -2035,14 +2067,15 @@ def sistema_integrado_duimp():
             st.markdown('<div style="height:.05rem"></div>', unsafe_allow_html=True)
             rc1, rc2 = st.columns(2)
             with rc1:
-                if st.button("🔄 DUIMP", type="secondary", use_container_width=True):
+                if st.button("🔄 DUIMP", type="secondary", **_WS):
                     st.session_state["parsed_duimp"] = None
                     st.session_state["merged_df"]    = None
                     st.rerun()
             with rc2:
-                if st.button("🔄 APP2", type="secondary", use_container_width=True):
-                    st.session_state["parsed_sigraweb"] = None; st.rerun()
-            if st.button("🗑️ Limpar Tudo", type="secondary", use_container_width=True):
+                if st.button("🔄 APP2", type="secondary", **_WS):
+                    st.session_state["parsed_sigraweb"] = None
+                    st.rerun()
+            if st.button("🗑️ Limpar Tudo", type="secondary", **_WS):
                 for k in ["parsed_duimp","parsed_sigraweb","merged_df","last_duimp"]:
                     st.session_state[k] = None
                 st.rerun()
@@ -2057,7 +2090,6 @@ def sistema_integrado_duimp():
         if doc_a2:
             itens_a2 = doc_a2.get('itens',[])
 
-            # Cabeçalho Sigraweb
             if st.session_state["layout_app2"] == "sigraweb":
                 cab = doc_a2.get('cabecalho',{})
                 with st.expander("📄 Dados do Processo — Sigraweb"):
@@ -2079,9 +2111,8 @@ def sistema_integrado_duimp():
                                  'fobEUR','fobBRL','freteUSD','freteBRL',
                                  'seguroUSD','seguroBRL','cifUSD','cifBRL',
                                  'valorAduaneiroUSD','valorAduaneiroBRL']]}
-                    st.dataframe(pd.DataFrame(dados), use_container_width=True, hide_index=True)
+                    st.dataframe(pd.DataFrame(dados), **_WS, hide_index=True)
 
-            # Tabela adições APP2
             lbl_exp = "Sigraweb" if st.session_state["layout_app2"]=="sigraweb" else "Extrato DUIMP"
             with st.expander(f"📑 Adições Extraídas — {lbl_exp}"):
                 if itens_a2:
@@ -2110,7 +2141,7 @@ def sistema_integrado_duimp():
                         'Total Imp.':   it.get('total_impostos',0),
                     } for it in itens_a2]
                     dfa2 = pd.DataFrame(rows)
-                    st.dataframe(dfa2, use_container_width=True, height=340)
+                    st.dataframe(dfa2, **_WS, height=340)
                     tt1,tt2,tt3,tt4,tt5 = st.columns(5)
                     tt1.metric("Vlr Adu. Total",f"R$ {dfa2['Vlr Adu. BRL'].sum():,.2f}")
                     tt2.metric("II Total",      f"R$ {dfa2['II R$'].sum():,.2f}")
@@ -2120,7 +2151,6 @@ def sistema_integrado_duimp():
                 else:
                     st.info("Nenhum item extraído.")
 
-        # ── Grade editável ────────────────────────────────────────────────
         if st.session_state["merged_df"] is not None:
             section_title("✏️ Grade de Edição — DUIMP + APP2")
             ccfg = {
@@ -2149,9 +2179,11 @@ def sistema_integrado_duimp():
                 "COFINS Alíq. (%)": st.column_config.NumberColumn("COF %",   format="%.4f"),
                 "COFINS (R$)":      st.column_config.NumberColumn("COF R$",  format="R$ %.2f"),
             }
-            edf = st.data_editor(st.session_state["merged_df"],
-                                 hide_index=True, column_config=ccfg,
-                                 use_container_width=True, height=540)
+            edf = st.data_editor(
+                st.session_state["merged_df"],
+                hide_index=True, column_config=ccfg,
+                **_WS, height=540,
+            )
             for tax in ['II','IPI','PIS','COFINS']:
                 bc_ = f"{tax} Base (R$)"; ac_ = f"{tax} Alíq. (%)"; vc_ = f"{tax} (R$)"
                 if bc_ in edf.columns and ac_ in edf.columns:
@@ -2193,10 +2225,17 @@ def sistema_integrado_duimp():
                 inp_pb  = st.text_input("Peso Bruto (XML)",   value=_pb)
                 inp_pl  = st.text_input("Peso Líquido (XML)", value=_pl)
                 st.markdown("**Locais (R$ / US$)**")
-                inp_ldd = st.text_input("Descarga US$", value="000000000000000")
-                inp_ldr = st.text_input("Descarga R$",  value="000000000000000")
-                inp_led = st.text_input("Embarque US$", value="000000000000000")
-                inp_ler = st.text_input("Embarque R$",  value="000000000000000")
+                # ── Auto-preenchimento a partir das tabelas "Despesas do Processo" / "Tributos" do Sigraweb ──
+                # VALOR ADUANEIRO (Dólar/Real) -> Descarga US$ / Descarga R$
+                # FOB (Dólar/Real)             -> Embarque US$ / Embarque R$
+                _aduaneiro_dolar_fmt = DataFormatter.format_input_fiscal(cab_sgw.get('despesasAduaneiroDolar','0')) if cab_sgw.get('despesasAduaneiroDolar') else '000000000000000'
+                _aduaneiro_real_fmt  = DataFormatter.format_input_fiscal(cab_sgw.get('despesasAduaneiroReal','0'))  if cab_sgw.get('despesasAduaneiroReal')  else '000000000000000'
+                _fob_dolar_fmt       = DataFormatter.format_input_fiscal(cab_sgw.get('despesasFobDolar','0'))       if cab_sgw.get('despesasFobDolar')       else '000000000000000'
+                _fob_real_fmt        = DataFormatter.format_input_fiscal(cab_sgw.get('despesasFobReal','0'))        if cab_sgw.get('despesasFobReal')        else '000000000000000'
+                inp_ldd = st.text_input("Descarga US$", value=_aduaneiro_dolar_fmt)
+                inp_ldr = st.text_input("Descarga R$",  value=_aduaneiro_real_fmt)
+                inp_led = st.text_input("Embarque US$", value=_fob_dolar_fmt)
+                inp_ler = st.text_input("Embarque R$",  value=_fob_real_fmt)
             with xc3:
                 st.markdown("**Pagamento & Conhecimento**")
                 inp_ag  = st.text_input("Agência",         value=cab_sgw.get('agencia','3715') or '3715')
@@ -2204,7 +2243,9 @@ def sistema_integrado_duimp():
                 inp_idc = st.text_input("IDT Conhecimento",value=cab_sgw.get('idtConhecimento','CE123456') or 'CE123456')
                 inp_idm = st.text_input("IDT Master",      value=cab_sgw.get('idtMaster','CE123456') or 'CE123456')
                 st.markdown("**Receita 7811**")
-                inp_r78 = st.text_input("Valor 7811", value="000000000000000")
+                # SISCOMEX -> Valor 7811
+                _siscomex_fmt = DataFormatter.format_input_fiscal(cab_sgw.get('tributosSiscomex','0')) if cab_sgw.get('tributosSiscomex') else '000000000000000'
+                inp_r78 = st.text_input("Valor 7811", value=_siscomex_fmt)
 
         user_xml = {
             "quantidadeVolume":              inp_vol,
@@ -2228,59 +2269,57 @@ def sistema_integrado_duimp():
         st.divider()
 
         if st.session_state["merged_df"] is not None:
-            if st.button("⚙️ Gerar XML (Layout 8686)", type="primary",
-                         use_container_width=True):
+            if st.button("⚙️ Gerar XML (Layout 8686)", type="primary", **_WS):
                 try:
                     p       = st.session_state["parsed_duimp"]
                     records = st.session_state["merged_df"].to_dict("records")
                     for i, item in enumerate(p.items):
-                        if i < len(records): item.update(records[i])
+                        if i < len(records):
+                            item.update(records[i])
                     builder   = XMLBuilder(p)
                     xml_bytes = builder.build(user_inputs=user_xml)
                     duimp_num = p.header.get("numeroDUIMP","0000").replace("/","-")
-                    st.download_button("⬇️ Baixar XML", data=xml_bytes,
-                                       file_name=f"DUIMP_{duimp_num}_INTEGRADO.xml",
-                                       mime="text/xml", use_container_width=True)
+                    st.download_button(
+                        "⬇️ Baixar XML", data=xml_bytes,
+                        file_name=f"DUIMP_{duimp_num}_INTEGRADO.xml",
+                        mime="text/xml", **_WS,
+                    )
                     st.success("✅ XML gerado com sucesso!")
                     with st.expander("👁️ Preview XML"):
                         st.code(xml_bytes.decode('utf-8', errors='ignore')[:3000], language='xml')
                 except Exception as e:
-                    st.error(f"Erro: {e}"); st.code(traceback.format_exc())
+                    st.error(f"Erro: {e}")
+                    st.code(traceback.format_exc())
         else:
             empty_state("💾", "Nenhum dado disponível",
                         "Realize o upload e a vinculação antes de gerar o XML")
 
 
+
+
+# ==============================================================================
 # ==============================================================================
 # APLICAÇÃO PRINCIPAL
 # ==============================================================================
 def main():
     load_css()
 
-    ph("""
+    st.markdown("""
     <div class="hero">
+        <div class="hero-glow-left"></div>
         <img src="https://raw.githubusercontent.com/DaniloNs-creator/final/7ea6ab2a610ef8f0c11be3c34f046e7ff2cdfc6a/haefele_logo.png"
              class="hero-logo" alt="Häfele">
         <h1 class="hero-title">Sistema de Processamento Unificado 2026</h1>
-        <p class="hero-sub">TXT · CT-e · DUIMP — Análise e geração de XML fiscal</p>
+        <p class="hero-sub">DUIMP · Sigraweb · Extrato · Geração de XML 8686</p>
         <div class="hero-chips">
-            <span class="chip">📄 TXT</span>
-            <span class="chip">🚚 CT-e</span>
             <span class="chip">📊 DUIMP</span>
             <span class="chip">🔵 Sigraweb</span>
             <span class="chip">🟠 Extrato DUIMP</span>
             <span class="chip">⚙️ XML 8686</span>
         </div>
-    </div>""")
+    </div>""", unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs([
-        "📄  Processador TXT",
-        "🚚  Processador CT-e",
-        "📊  Sistema Integrado DUIMP",
-    ])
-    with tab1: processador_txt()
-    with tab2: processador_cte()
-    with tab3: sistema_integrado_duimp()
+    sistema_integrado_duimp()
 
 
 if __name__ == "__main__":
